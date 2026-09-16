@@ -58,6 +58,8 @@ Common Odoo models:
 - hr.employee: HR Employees & Staff (name, work_email, department_id, job_title, work_phone)
 - crm.lead: CRM Pipeline & Leads (name, partner_id, partner_name, expected_revenue, stage_id, probability, user_id, create_date, type='opportunity' or 'lead', phone, email_from)
 - purchase.order: Purchase orders & Procurement (name, partner_id, amount_total, date_order, state, user_id)
+- purchase.order.line: Items / products inside a purchase order (order_id, name, product_id, product_qty, price_unit, price_subtotal). Use domain [["order_id.name", "ilike", "P01061"]] when asked about items/products in a specific PO.
+- sale.order.line: Items / products inside a sales order (order_id, name, product_id, product_uom_qty, price_unit, price_subtotal). Use domain [["order_id.name", "ilike", "S00049"]] when asked about items/products in a specific SO.
 - project.project: Projects & installations (name, partner_id, user_id, task_count, date_start, privacy_visibility)
 - project.task: Project Tasks & Milestones (name, project_id, user_ids, stage_id, priority, date_deadline)
 - account.move: Invoices & bills (move_type='out_invoice' for customer invoices, 'in_invoice' for vendor bills, amount_total, invoice_date, payment_state, partner_id, name, state='posted')
@@ -121,14 +123,25 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
     client_type, client = get_llm_client()
 
     query_plan = None
-    if client:
-        try:
-            query_plan = await _llm_classify(client_type, client, prompt, today_str)
-        except Exception:
-            pass
+    p_lower = prompt.lower()
+    po_ref_match = re.search(r"\b(p0\d+|p\d{3,})\b", p_lower)
+    so_ref_match = re.search(r"\b(s0\d+|so\d+|s\d{4,})\b", p_lower)
+    is_asking_lines = any(w in p_lower for w in ["item", "items", "product", "products", "line", "lines", "part", "parts", "component", "components", "what is in", "what are in", "contain", "contains"])
 
-    if not query_plan:
+    # Guarantee exact line-item model resolution when asking about PO/SO items
+    if po_ref_match or (is_asking_lines and any(w in p_lower for w in ["purchase", "po", "procurement", "vendor order", "supplier order"])):
         query_plan = _smart_nlp_classify(prompt, today)
+    elif so_ref_match or (is_asking_lines and any(w in p_lower for w in ["sale", "so", "quote", "quotation", "sales order"])):
+        query_plan = _smart_nlp_classify(prompt, today)
+    else:
+        if client:
+            try:
+                query_plan = await _llm_classify(client_type, client, prompt, today_str)
+            except Exception:
+                pass
+
+        if not query_plan:
+            query_plan = _smart_nlp_classify(prompt, today)
 
     # Execute Odoo Query
     raw_data = []
