@@ -53,7 +53,17 @@ Today's Date: {today}
 User Query: "{query}"
 
 IMPORTANT MULTILINGUAL INSTRUCTION:
-The user query may be in English, Malayalam (മലയാളം, e.g. "ഏറ്റവും കൂടുതൽ തുകയുള്ള പർച്ചേസ് ഓർഡർ ഏതാണ്?", "യൂസേഴ്സ് എത്ര ഉണ്ട്?"), Hindi, Arabic, or another language. Understand the user's intent regardless of the language and map it accurately to the appropriate Odoo model, domain, and fields.
+The user query may be in English, Malayalam (മലയാളം, e.g. "ലാസ്റ്റ് ചെയ്ത ഓർഡർ ഏതാണ്", "ഏറ്റവും കൂടുതൽ തുകയുള്ള പർച്ചേസ് ഓർഡർ ഏതാണ്?", "യൂസേഴ്സ് എത്ര ഉണ്ട്?"), Hindi, Arabic, or another language. Understand the user's intent regardless of the language and map it accurately to the appropriate Odoo model, domain, and fields.
+
+CRITICAL SORTING & INTENT RULES:
+- If the user asks for "last", "latest", "recent", "newest", "previous", or Malayalam words like "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന", "അവസാനം", "അവസാനത്തെ", "ഏറ്റവും പുതിയ", "പുതിയ", "കഴിഞ്ഞ", "മുമ്പത്തെ":
+  You MUST sort by the date field descending: e.g. "date_order desc, id desc" for sale.order/purchase.order, "invoice_date desc" for account.move, "create_date desc" for res.users/crm.lead. NEVER sort by amount_total when asking for the last or latest!
+- If the user asks for "highest", "top", "biggest", "കൂടുതൽ", "വലിയ", "ഏറ്റവും കൂടുതൽ", "ഉയർന്ന":
+  Set "order" to "<amount_field> desc".
+- If the user asks for "lowest", "least", "cheapest", "കുറഞ്ഞ", "ഏറ്റവും കുറഞ്ഞ":
+  Set "order" to "<amount_field> asc".
+- If the user asks for "how many", "count", "number of", "എത്ര", "എണ്ണം", "ആകെ":
+  Query the requested model and set limit to 50.
 
 Translate this query into an Odoo ORM search plan.
 Common Odoo models:
@@ -75,15 +85,15 @@ Common Odoo models:
 Respond ONLY with valid JSON (no markdown):
 {{
   "report_title": "Descriptive Title",
-  "model": "res.users",
-  "domain": [["share", "=", false]],
-  "fields": ["name", "login", "active", "create_date"],
-  "order": "create_date desc",
-  "limit": 25,
+  "model": "sale.order",
+  "domain": [["state", "in", ["sale", "done"]]],
+  "fields": ["name", "partner_id", "amount_total", "date_order", "user_id"],
+  "order": "date_order desc, id desc",
+  "limit": 10,
   "chart_type": "bar",
   "x_key": "name",
-  "y_keys": ["id"],
-  "entity_type": "user"
+  "y_keys": ["amount_total"],
+  "entity_type": "sale_order"
 }}
 """
 
@@ -99,23 +109,28 @@ Total matching records count: {total_count}
 
 MULTILINGUAL RESPONSE REQUIREMENT:
 - Detect the language of the user's question: "ml" for Malayalam (മലയാളം), "hi" for Hindi, "ar" for Arabic, "en" for English, etc.
-- If the question is in Malayalam (മലയാളം), formulate the "direct_answer", "executive_summary", "insights", "recommendations", "clarification_question", and "follow_up_suggestions" COMPLETELY in natural, fluent Malayalam script. Keep partner names, reference codes (like P01061), and numerical figures precise and clear.
+- If the question is in Malayalam (മലയാളം), formulate the "direct_answer", "executive_summary", "insights", "recommendations", "clarification_question", and "follow_up_suggestions" COMPLETELY in natural, fluent Malayalam script. Keep partner names, reference codes (like P01061, S00080), and numerical figures precise and clear.
 - If the question is in English, respond in English.
 - If the question is in another language, respond in that language.
 
-Provide an executive analysis in valid JSON (no markdown):
+CRITICAL SIMPLICITY & ACCURACY RULE:
+- ANSWER ONLY WHAT WAS ASKED. Keep it simple, direct, and completely accurate.
+- Do NOT provide unnecessary aggregate totals (e.g. do NOT mention total sales volume or aggregate dollars of all records if the user only asked for the last order, a specific order, or a specific customer).
+- Do NOT confuse the user with unrelated details.
+- "direct_answer": Exactly 1-2 clear, direct sentences answering the user's specific question with exact numbers, names, and dates.
+- "executive_summary": Leave empty or a brief 1-sentence confirmation relating directly to what was asked.
+
+Provide your response in valid JSON (no markdown):
 {{
   "detected_language": "en",
-  "direct_answer": "1-2 sentences directly answering the user's question with exact numbers, names, dates, or items from the data. If user asked 'how many', give the exact count first.",
-  "executive_summary": "2-3 sentences summarizing the broader context and totals from these records.",
+  "direct_answer": "Direct 1-sentence answer to the user's specific question.",
+  "executive_summary": "",
   "insights": [
-    "Specific analytical finding #1 with numbers",
-    "Specific analytical finding #2",
-    "Specific analytical finding #3"
+    "Specific detail #1 related only to what was asked",
+    "Specific detail #2 related only to what was asked"
   ],
   "recommendations": [
-    "Actionable executive advice #1",
-    "Actionable executive advice #2"
+    "1 actionable next step"
   ],
   "clarification_question": "Proactive follow-up question in the query language to offer deeper drill-down",
   "follow_up_suggestions": [
@@ -144,11 +159,16 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
     so_ref_match = re.search(r"\b(s0\d+|so\d+|s\d{4,})\b", p_lower)
     is_asking_lines = any(w in p_lower for w in ["item", "items", "product", "products", "line", "lines", "part", "parts", "component", "components", "what is in", "what are in", "contain", "contains"])
 
-    # Guarantee exact line-item model resolution when asking about PO/SO items
+    # 1. Run Smart NLP classification first
+    smart_plan = _smart_nlp_classify(prompt, today)
+
+    # Prioritize Smart NLP for line item queries or when a clear ERP entity/intent is recognized
     if po_ref_match or (is_asking_lines and any(w in p_lower for w in ["purchase", "po", "procurement", "vendor order", "supplier order"])):
-        query_plan = _smart_nlp_classify(prompt, today)
+        query_plan = smart_plan
     elif so_ref_match or (is_asking_lines and any(w in p_lower for w in ["sale", "so", "quote", "quotation", "sales order"])):
-        query_plan = _smart_nlp_classify(prompt, today)
+        query_plan = smart_plan
+    elif smart_plan.get("is_recognized"):
+        query_plan = smart_plan
     else:
         if client:
             try:
@@ -157,7 +177,7 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
                 pass
 
         if not query_plan:
-            query_plan = _smart_nlp_classify(prompt, today)
+            query_plan = smart_plan
 
     # Execute Odoo Query
     raw_data = []
@@ -168,8 +188,23 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
         error_message = str(e)
 
     # Generate Direct Answer, Summary, KPIs, and Table
+    # For targeted/specific queries (is_recent, is_count, is_highest, is_lowest, is_today, specific line items, users):
+    # ALWAYS use Smart NLP synthesis to guarantee a 100% exact, simple, direct answer in the user's language without confusing extra filler or aggregate numbers!
     synthesis = None
-    if client and raw_data:
+    is_targeted_query = (
+        query_plan.get("is_recent")
+        or query_plan.get("is_count")
+        or query_plan.get("is_highest")
+        or query_plan.get("is_lowest")
+        or query_plan.get("is_today")
+        or query_plan.get("entity_type") in ["purchase_order_line", "sale_order_line", "user"]
+        or query_plan.get("so_ref")
+        or query_plan.get("po_ref")
+    )
+
+    if is_targeted_query:
+        synthesis = _smart_nlp_synthesize(prompt, raw_data, query_plan, today)
+    elif client and raw_data:
         try:
             synthesis = await _llm_synthesize(client_type, client, prompt, raw_data[:25], today_str)
         except Exception:
@@ -362,6 +397,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_count": is_count,
             "is_today": is_today,
             "is_recent": is_recent,
+            "is_recognized": True,
         }
 
     elif any(w in p for w in ["lead", "pipeline", "crm", "opportunity", "deal", "ലീഡ്", "ലീഡുകൾ"]):
@@ -390,6 +426,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_count": is_count,
             "is_today": is_today,
             "is_recent": is_recent,
+            "is_recognized": True,
         }
 
     elif any(w in p for w in ["invoice", "bill", "payment", "overdue", "outstanding", "receivable", "ഇൻവോയ്സ്", "ബിൽ", "പണം", "കുടിശ്ശിക"]):
@@ -431,6 +468,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_recent": is_recent,
             "is_today": is_today,
             "is_count": is_count,
+            "is_recognized": True,
         }
 
     # Check for specific purchase order line items e.g. "what is the items in purchase order P01061"
@@ -458,6 +496,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": False,
             "is_recent": is_recent,
             "is_count": is_count,
+            "is_recognized": True,
         }
 
     # Check for specific sales order line items e.g. "what is the items in sales order S00049"
@@ -483,6 +522,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": False,
             "is_recent": is_recent,
             "is_count": is_count,
+            "is_recognized": True,
         }
 
     elif any(w in p for w in ["purchase", "po", "procurement", "vendor order", "supplier order", "buying", "പർച്ചേസ്", "വാങ്ങൽ", "സപ്ലയർ", "purchase order", "പർച്ചേസുകൾ"]):
@@ -498,15 +538,15 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             start_month = today.replace(day=1).strftime("%Y-%m-%d")
             domain.append(["date_order", ">=", start_month])
 
-        order = "date_order desc" if is_recent else f"amount_total {order_dir}"
+        order = "date_order desc, id desc" if is_recent else f"amount_total {order_dir}"
         return {
             "entity_type": "purchase_order",
-            "report_title": "Purchase Orders & Procurement",
+            "report_title": "Purchase Orders & Procurement" if not is_ml else ("അവസാനത്തെ പർച്ചേസ് ഓർഡർ" if is_recent else "പർച്ചേസ് ഓർഡറുകൾ"),
             "model": "purchase.order",
             "domain": domain,
             "fields": ["name", "partner_id", "amount_total", "date_order", "state", "user_id"],
             "order": order,
-            "limit": 30,
+            "limit": 10 if is_recent else 30,
             "chart_type": "bar",
             "x_key": "name",
             "y_keys": ["amount_total"],
@@ -515,6 +555,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": is_today,
             "is_recent": is_recent,
             "is_count": is_count,
+            "is_recognized": True,
         }
 
     elif any(w in p for w in ["project", "projects", "installation", "installations"]):
@@ -536,6 +577,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": is_today,
             "is_recent": is_recent,
             "is_count": is_count,
+            "is_recognized": True,
         }
 
     elif any(w in p for w in ["task", "tasks", "milestone", "todo", "action item"]):
@@ -556,6 +598,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": is_today,
             "is_recent": is_recent,
             "is_count": is_count,
+            "is_recognized": True,
         }
 
     elif any(w in p for w in ["delivery", "deliveries", "shipment", "shipments", "picking", "transfer", "transfers", "dispatch", "receipt", "receipts"]):
@@ -581,6 +624,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": is_today,
             "is_recent": is_recent,
             "is_count": is_count,
+            "is_recognized": True,
         }
 
     elif any(w in p for w in ["order", "sale", "sales", "quotation", "quote", "revenue", "സെയിൽസ്", "ഓർഡർ", "ഓർഡറുകൾ", "കച്ചവടം", "വിൽപന"]):
@@ -617,6 +661,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": is_today,
             "is_recent": is_recent,
             "is_count": is_count,
+            "is_recognized": True,
         }
 
     elif any(w in p for w in ["customer", "client"]):
@@ -633,6 +678,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "y_keys": ["total_invoiced"],
             "date_field": "",
             "value_field": "total_invoiced",
+            "is_recognized": True,
         }
 
     elif any(w in p for w in ["product", "products", "stock", "inventory", "catalog", "goods", "sku", "item"]):
@@ -649,9 +695,11 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "y_keys": ["qty_available"],
             "date_field": "",
             "value_field": "qty_available",
+            "is_recognized": True,
         }
 
     else:
+        is_smart_match = is_recent or is_count or is_highest or is_lowest or is_today
         order = "date_order desc, id desc" if is_recent else f"amount_total {order_dir}"
         if is_ml:
             title = "അവസാനത്തെ ഓർഡർ" if is_recent else "ബിസിനസ്സ് അനാലിസിസ്"
@@ -674,6 +722,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": is_today,
             "is_recent": is_recent,
             "is_count": is_count,
+            "is_recognized": is_smart_match,
         }
 
 
@@ -791,22 +840,30 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
         if len(user_names) > 6:
             names_str += f" and {len(user_names) - 6} more"
 
-        direct_answer = (
-            f"There are **{user_count} active internal users** configured in your Odoo system: **{names_str}**."
-        )
-        executive_summary = (
-            f"Retrieved {user_count} internal user accounts configured in Odoo. "
-            f"All accounts have active ERP credentials and role assignments."
-        )
-        insights = [
-            f"Total configured internal seats: {user_count} users",
-            f"Active logins: {names_str}",
-            f"Primary system administrator / key account: {records[0].get('name', 'Admin')} ({records[0].get('login', '-')})",
-        ]
-        recommendations = [
-            "Periodically audit user access groups and revoke inactive seat credentials to optimize Odoo license costs.",
-            "Enforce two-factor authentication (2FA) for all administrative logins.",
-        ]
+        if is_ml:
+            direct_answer = f"നിങ്ങളുടെ ഒഡൂ സിസ്റ്റത്തിൽ ആകെ **{user_count} ആക്റ്റീവ് യൂസേഴ്സ്** ഉണ്ട്: **{names_str}**."
+            executive_summary = f"സിസ്റ്റത്തിൽ കോൺഫിഗർ ചെയ്ത {user_count} ഇന്റേണൽ യൂസർ അക്കൗണ്ടുകൾ കണ്ടെത്തി."
+            insights = [
+                f"ആകെ ഇന്റേണൽ യൂസേഴ്സ്: {user_count}",
+                f"ആക്റ്റീവ് യൂസേഴ്സ്: {names_str}",
+            ]
+            recommendations = [
+                "യൂസർ അക്കൗണ്ടുകളും ആക്സസ് പെർമിഷനുകളും കൃത്യമായി ഓഡിറ്റ് ചെയ്യുക.",
+            ]
+        else:
+            direct_answer = (
+                f"There are **{user_count} active internal users** configured in your Odoo system: **{names_str}**."
+            )
+            executive_summary = (
+                f"Retrieved {user_count} internal user accounts configured in Odoo."
+            )
+            insights = [
+                f"Total configured internal seats: {user_count} users",
+                f"Active logins: {names_str}",
+            ]
+            recommendations = [
+                "Periodically audit user access groups to optimize license costs.",
+            ]
         return {
             "direct_answer": direct_answer,
             "executive_summary": executive_summary,
@@ -857,31 +914,64 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
         date_1 = top_record.get("invoice_date") or "Recently"
         status_1 = str(top_record.get("payment_state") or "unpaid")
 
-        if plan.get("is_recent") or any(w in prompt.lower() for w in ["last", "latest", "recent", "newest"]):
-            direct_answer = (
-                f"The last invoice number is **{name_1}** issued to **{partner_1}** for **{amount_1}** "
-                f"on {date_1} (Status: {status_1.replace('_', ' ').capitalize()})."
-            )
-            executive_summary = f"Retrieved your most recent invoices. The latest recorded invoice is {name_1} for {amount_1}."
+        if is_recent or any(w in p_lower for w in ["last", "latest", "recent", "newest", "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന"]):
+            if is_ml:
+                direct_answer = f"അവസാനത്തെ ഇൻവോയ്സ് നമ്പർ **{name_1}** ആണ് (കസ്റ്റമർ: **{partner_1}**, തുക: **{amount_1}**, തീയതി: {date_1}, സ്റ്റാറ്റസ്: {status_1})."
+                executive_summary = ""
+                insights = [f"ഇൻവോയ്സ് നമ്പർ: {name_1}", f"കസ്റ്റമർ: {partner_1}", f"തുക: {amount_1}"]
+                recommendations = [f"ഇൻവോയ്സ് {name_1}-ന്റെ പേയ്മെന്റ് നില പരിശോധിക്കുക."]
+            else:
+                direct_answer = (
+                    f"The last invoice number is **{name_1}** issued to **{partner_1}** for **{amount_1}** "
+                    f"on {date_1} (Status: {status_1.replace('_', ' ').capitalize()})."
+                )
+                executive_summary = ""
+                insights = [f"Invoice: {name_1}", f"Customer: {partner_1}", f"Amount: {amount_1}"]
+                recommendations = [f"Verify payment collection status for {name_1}."]
+        elif is_lowest:
+            if is_ml:
+                direct_answer = f"ഏറ്റവും കുറഞ്ഞ തുകയുള്ള ഇൻവോയ്സ് **{name_1}** ആണ് (കസ്റ്റമർ: **{partner_1}**, തുക: **{amount_1}**)."
+                executive_summary = f"കുറഞ്ഞ മൂല്യമുള്ള ഇൻവോയ്സ് {name_1} കണ്ടെത്തി."
+                insights = [f"ഇൻവോയ്സ്: {name_1}", f"തുക: {amount_1}"]
+                recommendations = ["പേയ്മെന്റ് സ്ഥിരീകരിക്കുക."]
+            else:
+                direct_answer = f"The lowest value invoice is **{name_1}** issued to **{partner_1}** for **{amount_1}**."
+                executive_summary = f"Retrieved lowest invoice {name_1}."
+                insights = [f"Invoice: {name_1}", f"Amount: {amount_1}"]
+                recommendations = ["Process payment receipt."]
+        elif is_count:
+            if is_ml:
+                direct_answer = f"നിങ്ങളുടെ സിസ്റ്റത്തിൽ ആകെ **{len(records)} ഇൻവോയ്സുകൾ** ഉണ്ട് (ആകെ തുക: **{_cur(total_val)}**)."
+                executive_summary = f"ആകെ {len(records)} ഇൻവോയ്സുകൾ കണ്ടെത്തി."
+                insights = [f"ആകെ ഇൻവോയ്സുകൾ: {len(records)}", f"ആകെ തുക: {_cur(total_val)}"]
+                recommendations = ["ഓവർഡ്യൂ ഇൻവോയ്സുകൾ നിരീക്ഷിക്കുക."]
+            else:
+                direct_answer = f"Found a total of **{len(records)} invoices** totaling **{_cur(total_val)}**."
+                executive_summary = f"Retrieved {len(records)} invoices."
+                insights = [f"Total invoices: {len(records)}", f"Total sum: {_cur(total_val)}"]
+                recommendations = ["Monitor overdue receivable aging."]
         else:
-            prefix = "Looking across your most recent posted invoices, the" if relaxed else "The"
-            direct_answer = (
-                f"{prefix} highest value invoice is **{name_1}** issued to **{partner_1}** for **{amount_1}** "
-                f"on {date_1} (Status: {status_1.replace('_', ' ').capitalize()})."
-            )
-            executive_summary = (
-                f"Retrieved {len(records)} invoices with a cumulative value of {_cur(total_val)}. "
-                f"The largest single invoice represents {((float(top_record.get('amount_total', 0))/total_val)*100 if total_val else 0):.1f}% of this group."
-            )
-        insights = [
-            f"Highest invoice: {name_1} ({partner_1}) at {amount_1}",
-            f"Total combined value of top {len(records)} invoices: {_cur(total_val)}",
-            f"Average invoice value: {_cur(total_val / len(records))}",
-        ]
-        recommendations = [
-            f"Prioritize collection verification for {name_1} ({amount_1}) to optimize cash flow.",
-            "Establish automated payment reminders for invoices over $10,000.",
-        ]
+            if is_ml:
+                direct_answer = f"ഏറ്റവും ഉയർന്ന തുകയുള്ള ഇൻവോയ്സ് **{name_1}** ആണ് (കസ്റ്റമർ: **{partner_1}**, തുക: **{amount_1}**, തീയതി: {date_1})."
+                executive_summary = f"ഉയർന്ന മൂല്യമുള്ള ഇൻവോയ്സ് {name_1} ({amount_1}) കണ്ടെത്തി."
+                insights = [f"ഇൻവോയ്സ്: {name_1}", f"കസ്റ്റമർ: {partner_1}", f"തുക: {amount_1}"]
+                recommendations = [f"{name_1}-ന്റെ കളക്ഷൻ മുൻഗണന നൽകുക."]
+            else:
+                prefix = "Looking across your most recent posted invoices, the" if relaxed else "The"
+                direct_answer = (
+                    f"{prefix} highest value invoice is **{name_1}** issued to **{partner_1}** for **{amount_1}** "
+                    f"on {date_1} (Status: {status_1.replace('_', ' ').capitalize()})."
+                )
+                executive_summary = (
+                    f"Retrieved {len(records)} invoices with a cumulative value of {_cur(total_val)}."
+                )
+                insights = [
+                    f"Highest invoice: {name_1} ({partner_1}) at {amount_1}",
+                    f"Total value of these invoices: {_cur(total_val)}",
+                ]
+                recommendations = [
+                    f"Prioritize collection verification for {name_1} ({amount_1}).",
+                ]
 
     elif entity == "purchase_order_line":
         total_items = len(records)
@@ -942,39 +1032,66 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
         status_1 = str(top_record.get("state") or "draft").replace("_", " ").title()
         is_ml = any('\u0D00' <= c <= '\u0D7F' for c in prompt)
 
-        if is_ml:
-            direct_answer = (
-                f"ഏറ്റവും ഉയർന്ന തുകയുള്ള പർച്ചേസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). ആകെ തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1}, സ്റ്റാറ്റസ്: {status_1})."
-            )
-            executive_summary = (
-                f"നിങ്ങളുടെ ഒഡൂ സിസ്റ്റത്തിലെ {len(records)} പർച്ചേസ് ഓർഡറുകൾ വിശകലനം ചെയ്തു. ആകെ വാങ്ങൽ മൂല്യം {_cur(total_val)} ആണ്."
-            )
-            insights = [
-                f"പ്രധാന പർച്ചേസ് ഓർഡർ: {name_1} ({partner_1}) - {amount_1}",
-                f"ആകെ പർച്ചേസ് ബാധ്യത: {_cur(total_val)}",
-                f"ശരാശരി ഓർഡർ തുക: {_cur(total_val / len(records))}",
-            ]
-            recommendations = [
-                "മെറ്റീരിയൽ കൃത്യസമയത്ത് ലഭിക്കാൻ സപ്ലയർ ഡെലിവറി തീയതി ഉറപ്പാക്കുക.",
-                "കൂടുതൽ വിലക്കിഴിവ് ലഭിക്കാൻ പ്രധാന സപ്ലയർമാരുമായുള്ള ഓർഡറുകൾ ഏകീകരിക്കുക.",
-            ]
+        if is_recent or any(w in p_lower for w in ["last", "latest", "recent", "newest", "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന"]):
+            if is_ml:
+                direct_answer = f"അവസാനമായി ചെയ്ത പർച്ചേസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1}, സ്റ്റാറ്റസ്: {status_1})."
+                executive_summary = ""
+                insights = [f"ഓർഡർ: {name_1}", f"സപ്ലയർ: {partner_1}", f"തുക: {amount_1}"]
+                recommendations = [f"ഓർഡർ {name_1}-ന്റെ സ്റ്റാറ്റസ് പരിശോധിക്കുക."]
+            else:
+                direct_answer = f"The last purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Order date: {date_1}, Status: {status_1})."
+                executive_summary = ""
+                insights = [f"PO Reference: {name_1}", f"Supplier: {partner_1}", f"Total: {amount_1}"]
+                recommendations = [f"Check delivery timeline for order {name_1}."]
+        elif is_count:
+            if is_ml:
+                direct_answer = f"നിങ്ങളുടെ സിസ്റ്റത്തിൽ ആകെ **{len(records)} പർച്ചേസ് ഓർഡറുകൾ** ഉണ്ട് (ആകെ തുക: **{_cur(total_val)}**)."
+                executive_summary = f"ആകെ {len(records)} പർച്ചേസ് ഓർഡറുകൾ കണ്ടെത്തി."
+                insights = [f"ആകെ പർച്ചേസുകൾ: {len(records)}", f"ആകെ തുക: {_cur(total_val)}"]
+                recommendations = ["ഡ്രാഫ്റ്റ് പർച്ചേസ് ഓർഡറുകൾ അവലോകനം ചെയ്യുക."]
+            else:
+                direct_answer = f"There are **{len(records)} purchase orders** recorded in your system totaling **{_cur(total_val)}**."
+                executive_summary = f"Retrieved {len(records)} purchase orders representing {_cur(total_val)}."
+                insights = [f"Total POs: {len(records)}", f"Total Amount: {_cur(total_val)}"]
+                recommendations = ["Review draft orders with suppliers."]
+        elif is_lowest:
+            if is_ml:
+                direct_answer = f"ഏറ്റവും കുറഞ്ഞ തുകയുള്ള പർച്ചേസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1})."
+                executive_summary = f"കുറഞ്ഞ തുകയുള്ള പർച്ചേസ് ഓർഡർ {name_1} കണ്ടെത്തി."
+                insights = [f"ഓർഡർ: {name_1}", f"സപ്ലയർ: {partner_1}", f"തുക: {amount_1}"]
+                recommendations = ["ഓർഡർ പരിശോധിക്കുക."]
+            else:
+                direct_answer = f"The lowest value purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Order date: {date_1})."
+                executive_summary = f"Retrieved lowest purchase order {name_1}."
+                insights = [f"PO: {name_1}", f"Supplier: {partner_1}", f"Amount: {amount_1}"]
+                recommendations = ["Review minimum order quantities."]
         else:
-            direct_answer = (
-                f"You have **{len(records)} purchase order{'s' if len(records) != 1 else ''}** recorded totaling **{_cur(total_val)}**. "
-                f"The primary purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Status: {status_1})."
-            )
-            executive_summary = (
-                f"Analyzed {len(records)} procurement records representing {_cur(total_val)} in total vendor commitments."
-            )
-            insights = [
-                f"Top purchase order: {name_1} ({partner_1}) at {amount_1}",
-                f"Total procurement volume in this group: {_cur(total_val)}",
-                f"Average PO commitment: {_cur(total_val / len(records))}",
-            ]
-            recommendations = [
-                "Review unconfirmed draft purchase orders with suppliers to ensure on-time delivery schedules.",
-                "Consolidate volume orders with preferred vendors to capture tiered pricing discounts.",
-            ]
+            if is_ml:
+                direct_answer = (
+                    f"ഏറ്റവും ഉയർന്ന തുകയുള്ള പർച്ചേസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). ആകെ തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1}, സ്റ്റാറ്റസ്: {status_1})."
+                )
+                executive_summary = f"പ്രധാന പർച്ചേസ് ഓർഡർ {name_1} ({amount_1}) കണ്ടെത്തി."
+                insights = [
+                    f"പ്രധാന പർച്ചേസ് ഓർഡർ: {name_1} ({partner_1}) - {amount_1}",
+                    f"ആകെ പർച്ചേസ് ബാധ്യത: {_cur(total_val)}",
+                ]
+                recommendations = [
+                    "മെറ്റീരിയൽ കൃത്യസമയത്ത് ലഭിക്കാൻ സപ്ലയർ ഡെലിവറി തീയതി ഉറപ്പാക്കുക.",
+                ]
+            else:
+                direct_answer = (
+                    f"The highest value purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Status: {status_1})."
+                )
+                executive_summary = (
+                    f"Top procurement commitment is {name_1} representing {amount_1}."
+                )
+                insights = [
+                    f"Top purchase order: {name_1} ({partner_1}) at {amount_1}",
+                    f"Total procurement volume: {_cur(total_val)}",
+                ]
+                recommendations = [
+                    "Review unconfirmed draft purchase orders with suppliers.",
+                ]
 
     elif entity == "project":
         lead_user = top_record.get("user_id")
@@ -1038,7 +1155,7 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
         if is_recent or any(w in p_lower for w in ["last", "latest", "recent", "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന"]):
             if is_ml:
                 direct_answer = f"അവസാനമായി ചെയ്ത ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1})."
-                executive_summary = f"ഏറ്റവും പുതിയ ഓർഡർ {name_1} ({partner_1}) {amount_1} തുകയ്ക്ക് വിജയകരമായി കണ്ടെത്തി."
+                executive_summary = ""
                 insights = [
                     f"ഓർഡർ നമ്പർ: {name_1}",
                     f"കസ്റ്റമർ: {partner_1}",
@@ -1049,7 +1166,7 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
                 ]
             else:
                 direct_answer = f"The last order made is **{name_1}** from **{partner_1}** for **{amount_1}** (Ordered: {date_1})."
-                executive_summary = f"Retrieved the latest confirmed sales order {name_1} with {partner_1} for {amount_1}."
+                executive_summary = ""
                 insights = [
                     f"Order reference: {name_1}",
                     f"Customer: {partner_1}",
