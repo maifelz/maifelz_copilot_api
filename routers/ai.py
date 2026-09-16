@@ -112,6 +112,10 @@ async def generate_ai_report(request: PromptRequest):
 
     try:
         result = await process_prompt(connector, request.prompt)
+        if tenant:
+            result["queries_used"] = tenant.get("queries_used", 0)
+            result["monthly_limit"] = tenant.get("monthly_limit", 2500)
+            result["remaining_queries"] = max(0, tenant.get("monthly_limit", 2500) - tenant.get("queries_used", 0))
         return AIReportResponse(**result)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI processing error: {str(e)}")

@@ -89,6 +89,10 @@ class AIReportResponse(BaseModel):
     clarification_question: Optional[str] = None
     follow_up_suggestions: Optional[List[str]] = None
     language: Optional[str] = "en"
+    engine: Optional[str] = "Google Gemini 2.0 Flash"
+    queries_used: Optional[int] = None
+    monthly_limit: Optional[int] = None
+    remaining_queries: Optional[int] = None
     error: Optional[str] = None
 
 

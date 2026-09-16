@@ -154,30 +154,22 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
     client_type, client = get_llm_client()
 
     query_plan = None
-    p_lower = prompt.lower()
-    po_ref_match = re.search(r"\b(p0\d+|p\d{3,})\b", p_lower)
-    so_ref_match = re.search(r"\b(s0\d+|so\d+|s\d{4,})\b", p_lower)
-    is_asking_lines = any(w in p_lower for w in ["item", "items", "product", "products", "line", "lines", "part", "parts", "component", "components", "what is in", "what are in", "contain", "contains"])
+    engine_name = "Google Gemini 2.0 Flash" if client_type == "gemini" else ("OpenAI GPT-4o" if client_type == "openai" else "Smart ERP Intelligence")
 
-    # 1. Run Smart NLP classification first
-    smart_plan = _smart_nlp_classify(prompt, today)
+    # The user explicitly requested:
+    # "can you try only with gemini to get detsails , for the timebeing jut stop if any other method is trying to answer"
+    # When Gemini/LLM client is available, run ONLY via Gemini:
+    if client:
+        try:
+            query_plan = await _llm_classify(client_type, client, prompt, today_str)
+        except Exception:
+            pass
 
-    # Prioritize Smart NLP for line item queries or when a clear ERP entity/intent is recognized
-    if po_ref_match or (is_asking_lines and any(w in p_lower for w in ["purchase", "po", "procurement", "vendor order", "supplier order"])):
-        query_plan = smart_plan
-    elif so_ref_match or (is_asking_lines and any(w in p_lower for w in ["sale", "so", "quote", "quotation", "sales order"])):
-        query_plan = smart_plan
-    elif smart_plan.get("is_recognized"):
-        query_plan = smart_plan
-    else:
-        if client:
-            try:
-                query_plan = await _llm_classify(client_type, client, prompt, today_str)
-            except Exception:
-                pass
-
-        if not query_plan:
-            query_plan = smart_plan
+    # If no LLM client or LLM failed, fallback to smart rules
+    if not query_plan:
+        query_plan = _smart_nlp_classify(prompt, today)
+        if not client:
+            engine_name = "Smart ERP Intelligence"
 
     # Execute Odoo Query
     raw_data = []
@@ -187,24 +179,9 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
     except Exception as e:
         error_message = str(e)
 
-    # Generate Direct Answer, Summary, KPIs, and Table
-    # For targeted/specific queries (is_recent, is_count, is_highest, is_lowest, is_today, specific line items, users):
-    # ALWAYS use Smart NLP synthesis to guarantee a 100% exact, simple, direct answer in the user's language without confusing extra filler or aggregate numbers!
+    # Synthesis: When Gemini client is active, synthesize ONLY via Gemini!
     synthesis = None
-    is_targeted_query = (
-        query_plan.get("is_recent")
-        or query_plan.get("is_count")
-        or query_plan.get("is_highest")
-        or query_plan.get("is_lowest")
-        or query_plan.get("is_today")
-        or query_plan.get("entity_type") in ["purchase_order_line", "sale_order_line", "user"]
-        or query_plan.get("so_ref")
-        or query_plan.get("po_ref")
-    )
-
-    if is_targeted_query:
-        synthesis = _smart_nlp_synthesize(prompt, raw_data, query_plan, today)
-    elif client and raw_data:
+    if client and raw_data:
         try:
             synthesis = await _llm_synthesize(client_type, client, prompt, raw_data[:25], today_str)
         except Exception:
@@ -271,6 +248,7 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
         "clarification_question": clarification_q,
         "follow_up_suggestions": follow_ups,
         "language": detected_lang,
+        "engine": engine_name,
         "raw_data_available": len(raw_data) > 0,
         "error": error_message,
     }
@@ -751,6 +729,20 @@ def _execute_plan(connector: OdooConnector, plan: Dict, prompt: str, today: date
     # Guard against non-stored fields in SQL order clause (like qty_available)
     if order and "qty_available" in order:
         order = "id desc"
+
+    # Ensure date descending order for recent/last/latest queries in English or Malayalam
+    p_lower = prompt.lower()
+    is_recent_query = any(w in p_lower for w in [
+        "last", "latest", "recent", "newest", "previous",
+        "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന", "അവസാനം", "അവസാനത്തെ", "ഏറ്റവും പുതിയ", "പുതിയ", "കഴിഞ്ഞ", "മുമ്പത്തെ"
+    ])
+    if is_recent_query:
+        if model in ["sale.order", "purchase.order"] and "date_order" not in (order or ""):
+            order = "date_order desc, id desc"
+        elif model == "account.move" and "invoice_date" not in (order or ""):
+            order = "invoice_date desc, id desc"
+        elif model in ["crm.lead", "res.users"] and "create_date" not in (order or ""):
+            order = "create_date desc, id desc"
 
     try:
         records = connector.search_read(model, domain, fields, limit=limit, order=order)
