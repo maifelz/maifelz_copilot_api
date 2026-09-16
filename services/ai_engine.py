@@ -331,9 +331,14 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
     is_last_month = any(w in p for w in ["last month", "കഴിഞ്ഞ മാസം", "കഴിഞ്ഞ മാസത്തെ", "kazhinja masam"])
     is_this_year = any(w in p for w in ["this year", "ഈ വർഷം", "ഈ വർഷത്തെ"])
 
-    # Sort order & intent (English + Malayalam)
+    # Sort order & intent (English + Malayalam + Transliterated)
+    is_ml = any('\u0D00' <= c <= '\u0D7F' for c in prompt)
     is_lowest = any(w in p for w in ["lowest", "smallest", "least", "cheapest", "minimum", "worst", "കുറഞ്ഞ", "ഏറ്റവും കുറഞ്ഞ", "ചെറിയ", "കുറവ്"])
-    is_recent = any(w in p for w in ["last", "latest", "recent", "newest", "number", "അവസാന", "ഏറ്റവും പുതിയ", "അവസാനത്തെ", "പുതിയ"])
+    is_recent = any(w in p for w in [
+        "last", "latest", "recent", "newest", "number", "previous",
+        "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന", "അവസാനം", "അവസാനത്തെ", "ഏറ്റവും പുതിയ", "പുതിയ", "കഴിഞ്ഞ", "മുമ്പത്തെ",
+        "avasana", "avasanam", "puthiya", "kazhinja"
+    ])
     is_count = any(w in p for w in ["how many", "count", "number of", "total", "എത്ര", "എണ്ണം", "ആകെ", "എത്രയുണ്ട്", "എത്ര ഉണ്ട്", "ethra"])
     is_highest = any(w in p for w in ["highest", "biggest", "top", "largest", "maximum", "best", "most", "കൂടിയ", "കൂടുതൽ", "വലിയ", "ഏറ്റവും കൂടുതൽ", "ഉയർന്ന", "ഏറ്റവും ഉയർന്ന", "kooduthal", "valiya"])
     order_dir = "asc" if is_lowest else "desc"
@@ -578,7 +583,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_count": is_count,
         }
 
-    elif any(w in p for w in ["order", "sale", "quotation", "revenue"]):
+    elif any(w in p for w in ["order", "sale", "sales", "quotation", "quote", "revenue", "സെയിൽസ്", "ഓർഡർ", "ഓർഡറുകൾ", "കച്ചവടം", "വിൽപന"]):
         domain = [["state", "in", ["sale", "done"]]]
         if is_today:
             domain.append(["date_order", ">=", today.strftime("%Y-%m-%d 00:00:00")])
@@ -586,15 +591,24 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             start_month = today.replace(day=1).strftime("%Y-%m-%d")
             domain.append(["date_order", ">=", start_month])
 
-        order = "date_order desc" if is_recent else f"amount_total {order_dir}"
+        order = "date_order desc, id desc" if (is_recent or is_today) else f"amount_total {order_dir}"
+        if is_recent:
+            title = "Latest Sales Orders" if not is_ml else "അവസാനത്തെ ഓർഡർ"
+        elif is_lowest:
+            title = "Lowest Sales Orders" if not is_ml else "കുറഞ്ഞ സെയിൽസ് ഓർഡറുകൾ"
+        elif is_count:
+            title = "Sales Orders Count" if not is_ml else "സെയിൽസ് ഓർഡറുകൾ"
+        else:
+            title = "Top Sales Orders" if not is_ml else "പ്രധാന സെയിൽസ് ഓർഡറുകൾ"
+
         return {
             "entity_type": "sale_order",
-            "report_title": "Top Sales Orders" if not is_lowest else "Lowest Sales Orders",
+            "report_title": title,
             "model": "sale.order",
             "domain": domain,
             "fields": ["name", "partner_id", "amount_total", "date_order", "user_id", "state"],
             "order": order,
-            "limit": 25,
+            "limit": 10 if is_recent else 25,
             "chart_type": "bar",
             "x_key": "name",
             "y_keys": ["amount_total"],
@@ -602,6 +616,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "value_field": "amount_total",
             "is_today": is_today,
             "is_recent": is_recent,
+            "is_count": is_count,
         }
 
     elif any(w in p for w in ["customer", "client"]):
@@ -637,19 +652,28 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
         }
 
     else:
+        order = "date_order desc, id desc" if is_recent else f"amount_total {order_dir}"
+        if is_ml:
+            title = "അവസാനത്തെ ഓർഡർ" if is_recent else "ബിസിനസ്സ് അനാലിസിസ്"
+        else:
+            title = "Latest Sales Orders" if is_recent else "Sales Orders Overview"
+
         return {
             "entity_type": "sale_order",
-            "report_title": f"Business Analysis: {prompt[:40]}",
+            "report_title": title,
             "model": "sale.order",
             "domain": [["state", "in", ["sale", "done"]]],
-            "fields": ["name", "partner_id", "amount_total", "date_order", "user_id"],
-            "order": f"amount_total {order_dir}",
-            "limit": 20,
+            "fields": ["name", "partner_id", "amount_total", "date_order", "user_id", "state"],
+            "order": order,
+            "limit": 10 if is_recent else 20,
             "chart_type": "bar",
             "x_key": "name",
             "y_keys": ["amount_total"],
             "date_field": "date_order",
             "value_field": "amount_total",
+            "is_today": is_today,
+            "is_recent": is_recent,
+            "is_count": is_count,
         }
 
 
@@ -739,6 +763,26 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
     name_1 = top_record.get("name") or f"Record #{top_record.get('id', '')}"
     partner_1 = _partner_str(top_record)
     total_val = sum(float(r.get(plan.get("value_field", "amount_total"), 0) or 0) for r in records)
+
+    p_lower = prompt.lower()
+    is_ml = any('\u0D00' <= c <= '\u0D7F' for c in prompt)
+    is_recent = plan.get("is_recent", False) or any(w in p_lower for w in [
+        "last", "latest", "recent", "newest", "number", "previous",
+        "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന", "അവസാനം", "അവസാനത്തെ", "ഏറ്റവും പുതിയ", "പുതിയ", "കഴിഞ്ഞ", "മുമ്പത്തെ",
+        "avasana", "avasanam", "puthiya", "kazhinja"
+    ])
+    is_count = plan.get("is_count", False) or any(w in p_lower for w in [
+        "how many", "count", "number of", "total", "how much",
+        "എത്ര", "എണ്ണം", "ആകെ എത്ര", "എത്രയുണ്ട്", "എത്ര ഉണ്ട്", "ആകെ"
+    ])
+    is_lowest = plan.get("is_lowest", False) or any(w in p_lower for w in [
+        "lowest", "smallest", "least", "cheapest", "minimum", "worst",
+        "കുറഞ്ഞ", "ഏറ്റവും കുറഞ്ഞ", "ചെറിയ", "കുറവ്"
+    ])
+    is_highest = any(w in p_lower for w in [
+        "highest", "biggest", "top", "largest", "maximum", "best", "most",
+        "കൂടിയ", "കൂടുതൽ", "വലിയ", "ഏറ്റവും കൂടുതൽ", "ഉയർന്ന", "ഏറ്റവും ഉയർന്ന"
+    ])
 
     if entity == "user":
         user_count = len(records)
@@ -989,22 +1033,65 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
 
     elif entity == "sale_order":
         amount_1 = _cur(top_record.get("amount_total", 0))
-        date_1 = top_record.get("date_order", "N/A")[:10]
-        direct_answer = (
-            f"The highest value sales order is **{name_1}** from **{partner_1}** for **{amount_1}** (Ordered: {date_1})."
-        )
-        executive_summary = (
-            f"Identified {len(records)} confirmed sales orders representing {_cur(total_val)} in gross sales volume."
-        )
-        insights = [
-            f"Top order: {name_1} with {partner_1} ({amount_1})",
-            f"Average order size across this segment: {_cur(total_val / len(records))}",
-            f"Total sales volume: {_cur(total_val)}",
-        ]
-        recommendations = [
-            f"Ensure timely fulfillment and VIP onboarding for client {partner_1}.",
-            "Analyze upsell potential for customers with orders exceeding average ticket size.",
-        ]
+        date_1 = str(top_record.get("date_order", "N/A"))[:10]
+
+        if is_recent or any(w in p_lower for w in ["last", "latest", "recent", "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന"]):
+            if is_ml:
+                direct_answer = f"അവസാനമായി ചെയ്ത ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1})."
+                executive_summary = f"ഏറ്റവും പുതിയ ഓർഡർ {name_1} ({partner_1}) {amount_1} തുകയ്ക്ക് വിജയകരമായി കണ്ടെത്തി."
+                insights = [
+                    f"ഓർഡർ നമ്പർ: {name_1}",
+                    f"കസ്റ്റമർ: {partner_1}",
+                    f"ഓർഡർ തുക: {amount_1}",
+                ]
+                recommendations = [
+                    f"ഓർഡർ {name_1} ന്റെ സ്റ്റാറ്റസും ഡെലിവറിയും നിരീക്ഷിക്കുക.",
+                ]
+            else:
+                direct_answer = f"The last order made is **{name_1}** from **{partner_1}** for **{amount_1}** (Ordered: {date_1})."
+                executive_summary = f"Retrieved the latest confirmed sales order {name_1} with {partner_1} for {amount_1}."
+                insights = [
+                    f"Order reference: {name_1}",
+                    f"Customer: {partner_1}",
+                    f"Order total: {amount_1}",
+                ]
+                recommendations = [
+                    f"Ensure timely delivery and customer follow-up for order {name_1}.",
+                ]
+        elif is_lowest:
+            if is_ml:
+                direct_answer = f"ഏറ്റവും കുറഞ്ഞ തുകയുള്ള സെയിൽസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (തീയതി: {date_1})."
+                executive_summary = f"കുറഞ്ഞ മൂല്യമുള്ള സെയിൽസ് ഓർഡർ {name_1} ({amount_1}) കണ്ടെത്തി."
+                insights = [f"ഓർഡർ: {name_1}", f"കസ്റ്റമർ: {partner_1}", f"തുക: {amount_1}"]
+                recommendations = ["ചെറിയ ഓർഡറുകളുടെ പ്രോസസ്സിംഗ് വേഗത്തിലാക്കുക."]
+            else:
+                direct_answer = f"The lowest value sales order is **{name_1}** from **{partner_1}** for **{amount_1}** (Ordered: {date_1})."
+                executive_summary = f"Retrieved lowest value sales order {name_1} representing {amount_1}."
+                insights = [f"Lowest order: {name_1}", f"Customer: {partner_1}", f"Amount: {amount_1}"]
+                recommendations = ["Optimize handling costs for smaller order tickets."]
+        elif is_count:
+            if is_ml:
+                direct_answer = f"നിങ്ങളുടെ സിസ്റ്റത്തിൽ ആകെ **{len(records)} സെയിൽസ് ഓർഡറുകൾ** ഉണ്ട് (ആകെ തുക: **{_cur(total_val)}**)."
+                executive_summary = f"ആകെ {len(records)} സെയിൽസ് ഓർഡറുകൾ കണ്ടെത്തി."
+                insights = [f"ആകെ ഓർഡറുകൾ: {len(records)}", f"ആകെ ബിസിനസ്സ്: {_cur(total_val)}", f"ശരാശരി തുക: {_cur(total_val / len(records))}"]
+                recommendations = ["ഓർഡർ പ്രോസസ്സിംഗ് വേഗത്തിലാക്കുക."]
+            else:
+                direct_answer = f"There are **{len(records)} confirmed sales orders** recorded in your system totaling **{_cur(total_val)}**."
+                executive_summary = f"Identified {len(records)} confirmed sales orders representing {_cur(total_val)} in gross sales volume."
+                insights = [f"Total orders: {len(records)}", f"Total volume: {_cur(total_val)}", f"Average size: {_cur(total_val / len(records))}"]
+                recommendations = ["Monitor order fulfillment pipelines."]
+        else:
+            # Highest Value (Default)
+            if is_ml:
+                direct_answer = f"ഏറ്റവും ഉയർന്ന തുകയുള്ള സെയിൽസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (തീയതി: {date_1})."
+                executive_summary = f"ഏറ്റവും ഉയർന്ന മൂല്യമുള്ള സെയിൽസ് ഓർഡർ {name_1} ({amount_1}) വിജയകരമായി കണ്ടെത്തി."
+                insights = [f"ടോപ്പ് ഓർഡർ: {name_1} ({partner_1}) - {amount_1}", f"ആകെ സെയിൽസ് മൂല്യം: {_cur(total_val)}"]
+                recommendations = [f"ക്ലയന്റ് {partner_1} ന് മുൻഗണന നൽകി ഡെലിവറി പൂർത്തിയാക്കുക."]
+            else:
+                direct_answer = f"The highest value sales order is **{name_1}** from **{partner_1}** for **{amount_1}** (Ordered: {date_1})."
+                executive_summary = f"Identified top sales order {name_1} representing {amount_1}."
+                insights = [f"Top order: {name_1} with {partner_1} ({amount_1})", f"Total sales volume: {_cur(total_val)}"]
+                recommendations = [f"Ensure timely fulfillment and VIP onboarding for client {partner_1}."]
 
     elif entity == "customer":
         inv_val = _cur(top_record.get("total_invoiced", 0))
@@ -1083,13 +1170,22 @@ def _build_chatter_clarifications(prompt: str, raw_data: List[Dict], plan: Dict)
     # 3. Sales Orders
     elif entity == "sale_order":
         so_name = top.get("name", "SO")
-        clarification = f"Would you like to see the products ordered in **{so_name}**, or analyze customer revenue?"
-        suggestions = [
-            f"What are the items in sales order {so_name}?",
-            "Top 10 customers by revenue",
-            "Show sales orders confirmed this month",
-            "Show sales pipeline and opportunities",
-        ]
+        if is_ml:
+            clarification = f"ഓർഡർ **{so_name}**-ലെ സാധനങ്ങളുടെ വിവരങ്ങൾ (Items) പരിശോധിക്കണോ?"
+            suggestions = [
+                f"ഓർഡർ {so_name} ലെ സാധനങ്ങൾ ഏതൊക്കെ?",
+                "ടോപ്പ് 10 കസ്റ്റമർമാർ",
+                "ഈ മാസത്തെ എല്ലാ ഓർഡറുകളും",
+                "ഏറ്റവും ഉയർന്ന തുകയുള്ള ഓർഡർ ഏതാണ്?",
+            ]
+        else:
+            clarification = f"Would you like to see the products ordered in **{so_name}**, or analyze customer revenue?"
+            suggestions = [
+                f"What are the items in sales order {so_name}?",
+                "Top 10 customers by revenue",
+                "Show sales orders confirmed this month",
+                "What is our largest order?",
+            ]
         return clarification, suggestions
 
     # 4. Sales Order Line Items
