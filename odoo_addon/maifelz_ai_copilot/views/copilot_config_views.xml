@@ -60,4 +60,22 @@
 action = model.action_open_config_screen()
         </field>
     </record>
+
+    <!-- Action that directly launches the cloud web portal in a new tab -->
+    <record id="action_open_maifelz_portal_server" model="ir.actions.server">
+        <field name="name">Open AI Copilot Portal</field>
+        <field name="model_id" ref="maifelz_ai_copilot.model_maifelz_copilot_config"/>
+        <field name="state">code</field>
+        <field name="code">
+config = model.search([], limit=1)
+if config:
+    action = config.action_open_portal()
+else:
+    action = {
+        'type': 'ir.actions.act_url',
+        'url': 'https://maifelz-copilot-web.vercel.app/login',
+        'target': 'new',
+    }
+        </field>
+    </record>
 </odoo>
