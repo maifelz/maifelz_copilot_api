@@ -354,69 +354,79 @@ def generate_excel_report(report_data: Dict[str, Any]) -> bytes:
         import openpyxl
         from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
         from openpyxl.utils import get_column_letter
-        
+
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "Report"
-        
+
         # Title row
-        ws["A1"] = f"mAifelZ AI Copilot — {report_data.get('report_title', 'Report')}"
-        ws["A1"].font = Font(bold=True, size=16, color="8B5CF6")
+        title = report_data.get("report_title", "Report")
+        ws["A1"] = f"mAifelZ AI Copilot — {title}"
+        ws["A1"].font = Font(bold=True, size=15, color="5A165D")
         ws["A2"] = f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
         ws["A2"].font = Font(color="6B7280", size=10)
-        
+
+        # Summary / Direct Answer
+        direct_ans = report_data.get("direct_answer") or report_data.get("executive_summary") or ""
         row = 4
-        
-        # KPIs
-        kpis = report_data.get("kpi_cards", [])
-        if kpis:
-            ws.cell(row=row, column=1, value="KEY METRICS").font = Font(bold=True, size=12)
+        if direct_ans:
+            ws.cell(row=row, column=1, value="EXECUTIVE SUMMARY").font = Font(bold=True, size=11, color="5A165D")
             row += 1
-            for i, kpi in enumerate(kpis):
-                ws.cell(row=row, column=i*2+1, value=kpi.get("title", ""))
-                ws.cell(row=row, column=i*2+1).font = Font(bold=True, color="6B7280", size=9)
-                ws.cell(row=row+1, column=i*2+1, value=kpi.get("value", ""))
-                ws.cell(row=row+1, column=i*2+1).font = Font(bold=True, size=14, color="8B5CF6")
-            row += 3
-        
-        # Data
-        sections = report_data.get("sections", [])
-        if sections:
-            section = sections[0]
-            data = section.get("data", [])
-            if data:
-                headers = list(data[0].keys())
-                # Header row
-                for col, h in enumerate(headers, 1):
-                    cell = ws.cell(row=row, column=col, value=h.replace("_", " ").title())
-                    cell.font = Font(bold=True, color="FFFFFF")
-                    cell.fill = PatternFill("solid", fgColor="8B5CF6")
-                    cell.alignment = Alignment(horizontal="center")
+            ws.cell(row=row, column=1, value=direct_ans)
+            ws.cell(row=row, column=1).alignment = Alignment(wrap_text=True)
+            row += 2
+
+        # Detailed Records Table
+        records = report_data.get("table_records") or []
+        columns = report_data.get("table_columns") or []
+
+        # Fallback to sections data if table_records is empty
+        if not records and report_data.get("sections"):
+            sec_data = report_data["sections"][0].get("data", [])
+            if sec_data:
+                records = sec_data
+                columns = [{"field": k, "label": k.replace("_", " ").title()} for k in sec_data[0].keys()]
+
+        if records and columns:
+            ws.cell(row=row, column=1, value="DATA RECORDS").font = Font(bold=True, size=11, color="5A165D")
+            row += 1
+            headers = [c.get("label", c.get("field", "")) for c in columns]
+            fields = [c.get("field", "") for c in columns]
+
+            # Header row
+            for col_idx, h in enumerate(headers, 1):
+                cell = ws.cell(row=row, column=col_idx, value=str(h))
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="5A165D")
+                cell.alignment = Alignment(horizontal="center")
+            row += 1
+
+            # Record rows
+            for record in records:
+                for col_idx, f in enumerate(fields, 1):
+                    val = record.get(f, "")
+                    if isinstance(val, (list, tuple)) and len(val) == 2:
+                        val = val[1]
+                    ws.cell(row=row, column=col_idx, value=val)
                 row += 1
-                # Data rows
-                for record in data:
-                    for col, key in enumerate(headers, 1):
-                        ws.cell(row=row, column=col, value=record.get(key, ""))
-                    row += 1
-        
+
         # Auto-fit columns
         for col in ws.columns:
             max_len = max((len(str(c.value or "")) for c in col), default=10)
-            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 40)
-        
+            ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 45)
+
         buf = io.BytesIO()
         wb.save(buf)
         return buf.getvalue()
-    
-    except ImportError:
-        # Return CSV as fallback
-        sections = report_data.get("sections", [])
-        if sections:
-            data = sections[0].get("data", [])
-            if data:
-                headers = list(data[0].keys())
-                lines = [",".join(headers)]
-                for row in data:
-                    lines.append(",".join(str(row.get(h, "")) for h in headers))
-                return "\n".join(lines).encode()
+
+    except Exception:
+        # Fallback to simple CSV bytes
+        records = report_data.get("table_records") or []
+        if records:
+            headers = list(records[0].keys())
+            lines = [",".join(headers)]
+            for row in records:
+                lines.append(",".join(str(row.get(h, "")) for h in headers))
+            return "\n".join(lines).encode()
         return b"No data"
+

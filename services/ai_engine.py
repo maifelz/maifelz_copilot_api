@@ -679,21 +679,64 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
 
     # Timeframe detection (English + Malayalam + Transliterated)
     is_today = any(w in p for w in ["today", "to day", "current day", "ഇന്ന്", "ഇന്നത്തെ", "innu", "innathe"])
+    is_yesterday = any(w in p for w in ["yesterday", "ഇന്നലെ", "ഇന്നലത്തെ", "innale", "innalathe"])
+
+    days_match = re.search(r"(?:last|past|previous)\s+(\d+)\s+days?", p) or re.search(r"കഴിഞ്ഞ\s+(\d+)\s+ദിവസം", p)
+    num_days = int(days_match.group(1)) if days_match else None
+    is_days_range = num_days is not None
+
+    is_last_week = any(w in p for w in ["last week", "past week", "കഴിഞ്ഞ ആഴ്ച", "kazhinja aazhcha"])
     is_this_month = (any(w in p for w in ["this month", "current month", "ഈ മാസം", "ഈ മാസത്തെ", "ee masam"]) and not is_today)
-    is_last_month = any(w in p for w in ["last month", "കഴിഞ്ഞ മാസം", "കഴിഞ്ഞ മാസത്തെ", "kazhinja masam"])
-    is_this_year = any(w in p for w in ["this year", "ഈ വർഷം", "ഈ വർഷത്തെ"])
+    is_last_month = any(w in p for w in ["last month", "previous month", "കഴിഞ്ഞ മാസം", "കഴിഞ്ഞ മാസത്തെ", "kazhinja masam"])
+    is_this_year = any(w in p for w in ["this year", "current year", "ഈ വർഷം", "ഈ വർഷത്തെ"])
+
+    # Calendar Date Calculations
+    first_of_this_month = today.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    last_month_end = first_of_this_month - timedelta(seconds=1)
+    last_month_start = last_month_end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    last_month_name = last_month_start.strftime("%B %Y")
+
+    has_timeframe = is_today or is_yesterday or is_days_range or is_last_week or is_this_month or is_last_month or is_this_year
 
     # Sort order & intent (English + Malayalam + Transliterated)
     is_ml = any('\u0D00' <= c <= '\u0D7F' for c in prompt)
     is_lowest = any(w in p for w in ["lowest", "smallest", "least", "cheapest", "minimum", "worst", "കുറഞ്ഞ", "ഏറ്റവും കുറഞ്ഞ", "ചെറിയ", "കുറവ്"])
-    is_recent = any(w in p for w in [
-        "last", "latest", "recent", "newest", "number", "previous",
-        "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന", "അവസാനം", "അവസാനത്തെ", "ഏറ്റവും പുതിയ", "പുതിയ", "കഴിഞ്ഞ", "മുമ്പത്തെ",
-        "avasana", "avasanam", "puthiya", "kazhinja"
-    ])
+    is_recent = (not has_timeframe) and (
+        any(w in p for w in [
+            "latest", "recent", "newest", "number", "previous",
+            "ലേറ്റസ്റ്റ്", "അവസാന", "അവസാനം", "അവസാനത്തെ", "ഏറ്റവും പുതിയ", "പുതിയ",
+            "avasana", "avasanam", "puthiya"
+        ]) or any(w in p.split() for w in ["last", "ലാസ്റ്റ്"])
+    )
     is_count = any(w in p for w in ["how many", "count", "number of", "total", "എത്ര", "എണ്ണം", "ആകെ", "എത്രയുണ്ട്", "എത്ര ഉണ്ട്", "ethra"])
     is_highest = any(w in p for w in ["highest", "biggest", "top", "largest", "maximum", "best", "most", "കൂടിയ", "കൂടുതൽ", "വലിയ", "ഏറ്റവും കൂടുതൽ", "ഉയർന്ന", "ഏറ്റവും ഉയർന്ന", "kooduthal", "valiya"])
     order_dir = "asc" if is_lowest else "desc"
+
+    # Timeframe SQL Filter Range
+    time_start_str = None
+    time_end_str = None
+    time_title_suffix = ""
+
+    if is_today:
+        time_start_str = today.strftime("%Y-%m-%d 00:00:00")
+        time_title_suffix = "Today"
+    elif is_yesterday:
+        time_start_str = (today - timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
+        time_end_str = (today - timedelta(days=1)).strftime("%Y-%m-%d 23:59:59")
+        time_title_suffix = "Yesterday"
+    elif is_days_range and num_days:
+        time_start_str = (today - timedelta(days=num_days)).strftime("%Y-%m-%d 00:00:00")
+        time_title_suffix = f"Last {num_days} Days"
+    elif is_last_week:
+        time_start_str = (today - timedelta(days=7)).strftime("%Y-%m-%d 00:00:00")
+        time_title_suffix = "Last Week"
+    elif is_last_month:
+        time_start_str = last_month_start.strftime("%Y-%m-%d 00:00:00")
+        time_end_str = last_month_end.strftime("%Y-%m-%d 23:59:59")
+        time_title_suffix = f"Last Month ({last_month_name})"
+    elif is_this_month:
+        time_start_str = first_of_this_month.strftime("%Y-%m-%d 00:00:00")
+        time_title_suffix = "This Month"
 
     # Entities
     if any(w in p for w in ["user", "users", "login", "logins", "account", "accounts", "staff", "employee", "employees", "configured user", "യൂസർ", "യൂസേഴ്സ്", "ഉപയോക്താക്കൾ", "ജീവനക്കാർ"]) or ("used" in p and any(k in p for k in ["odoo", "how many", "system", "many", "configured"])):
@@ -719,13 +762,13 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
 
     elif any(w in p for w in ["lead", "pipeline", "crm", "opportunity", "deal", "ലീഡ്", "ലീഡുകൾ"]):
         domain = [["type", "=", "opportunity"]]
-        if is_today:
-            domain.append(["create_date", ">=", today.strftime("%Y-%m-%d 00:00:00")])
-        elif is_this_month:
-            domain.append(["create_date", ">=", today.replace(day=1).strftime("%Y-%m-%d 00:00:00")])
+        if time_start_str:
+            domain.append(["create_date", ">=", time_start_str])
+        if time_end_str:
+            domain.append(["create_date", "<=", time_end_str])
 
-        order = "create_date desc" if (is_recent or is_today or is_count) else f"expected_revenue {order_dir}"
-        title = "Leads Generated Today" if is_today else ("Sales Pipeline Leads" if is_count else "Sales Pipeline & Opportunities")
+        order = "create_date desc" if (is_recent or has_timeframe or is_count) else f"expected_revenue {order_dir}"
+        title = f"Leads Generated ({time_title_suffix})" if time_title_suffix else ("Sales Pipeline Leads" if is_count else "Sales Pipeline & Opportunities")
 
         return {
             "entity_type": "lead",
@@ -734,7 +777,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "domain": domain,
             "fields": ["name", "partner_id", "partner_name", "expected_revenue", "stage_id", "probability", "user_id", "create_date", "phone", "email_from"],
             "order": order,
-            "limit": 25,
+            "limit": 100 if (has_timeframe or is_count) else (10 if is_recent else 25),
             "chart_type": "bar",
             "x_key": "name",
             "y_keys": ["expected_revenue"],
@@ -743,6 +786,8 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_count": is_count,
             "is_today": is_today,
             "is_recent": is_recent,
+            "has_timeframe": has_timeframe,
+            "time_title_suffix": time_title_suffix,
             "is_recognized": True,
         }
 
@@ -760,14 +805,18 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             domain.append(["name", "!=", "/"])
 
         # Date filter if requested
-        if is_today:
-            domain.append(["invoice_date", "=", today.strftime("%Y-%m-%d")])
-        elif is_this_month:
-            start_month = today.replace(day=1).strftime("%Y-%m-%d")
-            domain.append(["invoice_date", ">=", start_month])
+        if time_start_str:
+            domain.append(["invoice_date", ">=", time_start_str[:10]])
+        if time_end_str:
+            domain.append(["invoice_date", "<=", time_end_str[:10]])
 
-        sort_field = "id desc" if is_recent else f"amount_total {order_dir}"
-        title = "Latest Invoices" if is_recent else ("Highest Value Invoices" if not is_lowest else "Lowest Value Invoices")
+        sort_field = "id desc" if is_recent else (f"amount_total {order_dir}" if not has_timeframe else "invoice_date desc")
+        if time_title_suffix:
+            title = f"Invoices ({time_title_suffix})"
+        elif is_recent:
+            title = "Latest Invoices"
+        else:
+            title = "Highest Value Invoices" if not is_lowest else "Lowest Value Invoices"
 
         return {
             "entity_type": "invoice",
@@ -776,7 +825,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "domain": domain,
             "fields": ["name", "partner_id", "amount_total", "amount_residual", "invoice_date", "payment_state", "state"],
             "order": sort_field,
-            "limit": 25,
+            "limit": 100 if (has_timeframe or is_count) else (10 if is_recent else 25),
             "chart_type": "bar",
             "x_key": "name",
             "y_keys": ["amount_total"],
@@ -785,6 +834,8 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_recent": is_recent,
             "is_today": is_today,
             "is_count": is_count,
+            "has_timeframe": has_timeframe,
+            "time_title_suffix": time_title_suffix,
             "is_recognized": True,
         }
 
@@ -844,26 +895,34 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
 
     elif any(w in p for w in ["purchase", "po", "procurement", "vendor order", "supplier order", "buying", "പർച്ചേസ്", "വാങ്ങൽ", "സപ്ലയർ", "purchase order", "പർച്ചേസുകൾ"]):
         domain = []
-        if "draft" in p:
-            domain.append(["state", "=", "draft"])
+        if "draft" in p or "rfq" in p:
+            domain.append(["state", "in", ["draft", "sent"]])
         elif "done" in p or "confirmed" in p:
             domain.append(["state", "in", ["purchase", "done"]])
 
-        if is_today:
-            domain.append(["date_order", ">=", today.strftime("%Y-%m-%d 00:00:00")])
-        elif is_this_month:
-            start_month = today.replace(day=1).strftime("%Y-%m-%d")
-            domain.append(["date_order", ">=", start_month])
+        if time_start_str:
+            domain.append(["date_order", ">=", time_start_str])
+        if time_end_str:
+            domain.append(["date_order", "<=", time_end_str])
 
-        order = "date_order desc, id desc" if is_recent else f"amount_total {order_dir}"
+        order = "date_order desc, id desc" if (is_recent or has_timeframe or is_count) else f"amount_total {order_dir}"
+        if time_title_suffix:
+            title = f"Purchase Orders ({time_title_suffix})"
+        elif is_recent:
+            title = "Latest Purchase Order" if not is_ml else "അവസാനത്തെ പർച്ചേസ് ഓർഡർ"
+        elif is_count:
+            title = "Purchase Orders Count" if not is_ml else "പർച്ചേസ് ഓർഡറുകൾ"
+        else:
+            title = "Purchase Orders & Procurement" if not is_ml else "പർച്ചേസ് ഓർഡറുകൾ"
+
         return {
             "entity_type": "purchase_order",
-            "report_title": "Purchase Orders & Procurement" if not is_ml else ("അവസാനത്തെ പർച്ചേസ് ഓർഡർ" if is_recent else "പർച്ചേസ് ഓർഡറുകൾ"),
+            "report_title": title,
             "model": "purchase.order",
             "domain": domain,
             "fields": ["name", "partner_id", "amount_total", "date_order", "state", "user_id"],
             "order": order,
-            "limit": 10 if is_recent else 30,
+            "limit": 100 if (has_timeframe or is_count) else (10 if is_recent else 30),
             "chart_type": "bar",
             "x_key": "name",
             "y_keys": ["amount_total"],
@@ -872,6 +931,10 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": is_today,
             "is_recent": is_recent,
             "is_count": is_count,
+            "has_timeframe": has_timeframe,
+            "is_last_month": is_last_month,
+            "month_name": last_month_name,
+            "time_title_suffix": time_title_suffix,
             "is_recognized": True,
         }
 
@@ -925,14 +988,19 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
         elif "done" in p or "completed" in p:
             domain.append(["state", "=", "done"])
 
+        if time_start_str:
+            domain.append(["scheduled_date", ">=", time_start_str])
+        if time_end_str:
+            domain.append(["scheduled_date", "<=", time_end_str])
+
         return {
             "entity_type": "stock_picking",
-            "report_title": "Warehouse Shipments & Deliveries",
+            "report_title": f"Warehouse Shipments ({time_title_suffix})" if time_title_suffix else "Warehouse Shipments & Deliveries",
             "model": "stock.picking",
             "domain": domain,
             "fields": ["name", "partner_id", "picking_type_id", "state", "scheduled_date", "origin"],
-            "order": "scheduled_date desc" if is_recent else "id desc",
-            "limit": 30,
+            "order": "scheduled_date desc" if (is_recent or has_timeframe) else "id desc",
+            "limit": 100 if (has_timeframe or is_count) else 30,
             "chart_type": "bar",
             "x_key": "name",
             "y_keys": ["id"],
@@ -941,19 +1009,32 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": is_today,
             "is_recent": is_recent,
             "is_count": is_count,
+            "has_timeframe": has_timeframe,
+            "time_title_suffix": time_title_suffix,
             "is_recognized": True,
         }
 
     elif any(w in p for w in ["order", "sale", "sales", "quotation", "quote", "revenue", "സെയിൽസ്", "ഓർഡർ", "ഓർഡറുകൾ", "കച്ചവടം", "വിൽപന"]):
-        domain = [["state", "in", ["sale", "done"]]]
-        if is_today:
-            domain.append(["date_order", ">=", today.strftime("%Y-%m-%d 00:00:00")])
-        elif is_this_month:
-            start_month = today.replace(day=1).strftime("%Y-%m-%d")
-            domain.append(["date_order", ">=", start_month])
+        is_created_query = any(w in p for w in ["create", "created", "ഉണ്ടാക്കിയ", "രൂപീകരിച്ച"])
+        
+        # If user asks about quotation or draft or created or count:
+        if "confirmed" in p or "done" in p:
+            domain = [["state", "in", ["sale", "done"]]]
+        elif "draft" in p or "quotation" in p or "quote" in p:
+            domain = [["state", "in", ["draft", "sent"]]]
+        else:
+            # When counting or asking orders created, check all non-cancelled orders
+            domain = [["state", "!=", "cancel"]]
 
-        order = "date_order desc, id desc" if (is_recent or is_today) else f"amount_total {order_dir}"
-        if is_recent:
+        if time_start_str:
+            domain.append(["date_order", ">=", time_start_str])
+        if time_end_str:
+            domain.append(["date_order", "<=", time_end_str])
+
+        order = "date_order desc, id desc" if (is_recent or has_timeframe or is_count) else f"amount_total {order_dir}"
+        if time_title_suffix:
+            title = f"Sales Orders ({time_title_suffix})"
+        elif is_recent:
             title = "Latest Sales Orders" if not is_ml else "അവസാനത്തെ ഓർഡർ"
         elif is_lowest:
             title = "Lowest Sales Orders" if not is_ml else "കുറഞ്ഞ സെയിൽസ് ഓർഡറുകൾ"
@@ -969,7 +1050,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "domain": domain,
             "fields": ["name", "partner_id", "amount_total", "date_order", "user_id", "state"],
             "order": order,
-            "limit": 10 if is_recent else 25,
+            "limit": 100 if (has_timeframe or is_count) else (10 if is_recent else 25),
             "chart_type": "bar",
             "x_key": "name",
             "y_keys": ["amount_total"],
@@ -978,6 +1059,10 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_today": is_today,
             "is_recent": is_recent,
             "is_count": is_count,
+            "has_timeframe": has_timeframe,
+            "is_last_month": is_last_month,
+            "month_name": last_month_name,
+            "time_title_suffix": time_title_suffix,
             "is_recognized": True,
         }
 
@@ -1180,11 +1265,16 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
 
     p_lower = prompt.lower()
     is_ml = any('\u0D00' <= c <= '\u0D7F' for c in prompt)
-    is_recent = plan.get("is_recent", False) or any(w in p_lower for w in [
-        "last", "latest", "recent", "newest", "number", "previous",
-        "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന", "അവസാനം", "അവസാനത്തെ", "ഏറ്റവും പുതിയ", "പുതിയ", "കഴിഞ്ഞ", "മുമ്പത്തെ",
-        "avasana", "avasanam", "puthiya", "kazhinja"
-    ])
+    has_timeframe = plan.get("has_timeframe", False) or plan.get("is_last_month", False) or plan.get("is_today", False)
+    is_recent = plan.get("is_recent", False) or (
+        (not has_timeframe) and (
+            any(w in p_lower for w in [
+                "latest", "recent", "newest", "previous",
+                "ലേറ്റസ്റ്റ്", "അവസാന", "അവസാനം", "അവസാനത്തെ", "ഏറ്റവും പുതിയ", "പുതിയ",
+                "avasana", "avasanam", "puthiya"
+            ]) or any(w in p_lower.split() for w in ["last", "ലാസ്റ്റ്"])
+        )
+    )
     is_count = plan.get("is_count", False) or any(w in p_lower for w in [
         "how many", "count", "number of", "total", "how much",
         "എത്ര", "എണ്ണം", "ആകെ എത്ര", "എത്രയുണ്ട്", "എത്ര ഉണ്ട്", "ആകെ"
@@ -1396,67 +1486,75 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
         date_1 = str(top_record.get("date_order", "N/A"))[:10]
         status_1 = str(top_record.get("state") or "draft").replace("_", " ").title()
         is_ml = any('\u0D00' <= c <= '\u0D7F' for c in prompt)
+        time_suffix = plan.get("time_title_suffix") or ("last month" if plan.get("is_last_month") else "the selected period")
 
-        if is_recent or any(w in p_lower for w in ["last", "latest", "recent", "newest", "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന"]):
+        if (has_timeframe or is_count) and not is_recent:
+            confirmed_orders = [r for r in records if r.get("state") in ["purchase", "done"]]
+            draft_orders = [r for r in records if r.get("state") in ["draft", "sent"]]
+            total_count = len(records)
+            confirmed_count = len(confirmed_orders)
+            draft_count = len(draft_orders)
+            confirmed_val = sum(float(r.get("amount_total", 0) or 0) for r in confirmed_orders)
+            draft_val = sum(float(r.get("amount_total", 0) or 0) for r in draft_orders)
+
+            if is_ml:
+                direct_answer = (
+                    f"{time_suffix}-ൽ ആകെ **{total_count} പർച്ചേസ് ഓർഡറുകൾ** കണ്ടെത്തി (ആകെ തുക: **{_cur(total_val)}**). "
+                    f"ഇതിൽ **{confirmed_count} കൺഫേം ചെയ്ത PO-കളും** ({_cur(confirmed_val)}) "
+                    f"**{draft_count} ഡ്രാഫ്റ്റ് RFQ-കളും** ({_cur(draft_val)}) ഉൾപ്പെടുന്നു."
+                )
+            else:
+                direct_answer = (
+                    f"In **{time_suffix}**, there were **{total_count} purchase orders** recorded totaling **{_cur(total_val)}** "
+                    f"(comprising **{confirmed_count} confirmed purchase orders** worth {_cur(confirmed_val)} "
+                    f"and **{draft_count} draft RFQs** worth {_cur(draft_val)})."
+                )
+            return {
+                "direct_answer": direct_answer,
+                "executive_summary": "",
+                "insights": [
+                    f"Total purchase orders: {total_count}",
+                    f"Confirmed procurement: {confirmed_count} ({_cur(confirmed_val)})",
+                    f"Draft RFQs: {draft_count} ({_cur(draft_val)})",
+                ],
+                "recommendations": [
+                    "Review unconfirmed RFQs with vendors to lock in lead times."
+                ],
+            }
+
+        elif is_recent:
             if is_ml:
                 direct_answer = f"അവസാനമായി ചെയ്ത പർച്ചേസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1}, സ്റ്റാറ്റസ്: {status_1})."
-                executive_summary = ""
-                insights = [f"ഓർഡർ: {name_1}", f"സപ്ലയർ: {partner_1}", f"തുക: {amount_1}"]
-                recommendations = [f"ഓർഡർ {name_1}-ന്റെ സ്റ്റാറ്റസ് പരിശോധിക്കുക."]
             else:
                 direct_answer = f"The last purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Order date: {date_1}, Status: {status_1})."
-                executive_summary = ""
-                insights = [f"PO Reference: {name_1}", f"Supplier: {partner_1}", f"Total: {amount_1}"]
-                recommendations = [f"Check delivery timeline for order {name_1}."]
-        elif is_count:
-            if is_ml:
-                direct_answer = f"നിങ്ങളുടെ സിസ്റ്റത്തിൽ ആകെ **{len(records)} പർച്ചേസ് ഓർഡറുകൾ** ഉണ്ട് (ആകെ തുക: **{_cur(total_val)}**)."
-                executive_summary = f"ആകെ {len(records)} പർച്ചേസ് ഓർഡറുകൾ കണ്ടെത്തി."
-                insights = [f"ആകെ പർച്ചേസുകൾ: {len(records)}", f"ആകെ തുക: {_cur(total_val)}"]
-                recommendations = ["ഡ്രാഫ്റ്റ് പർച്ചേസ് ഓർഡറുകൾ അവലോകനം ചെയ്യുക."]
-            else:
-                direct_answer = f"There are **{len(records)} purchase orders** recorded in your system totaling **{_cur(total_val)}**."
-                executive_summary = f"Retrieved {len(records)} purchase orders representing {_cur(total_val)}."
-                insights = [f"Total POs: {len(records)}", f"Total Amount: {_cur(total_val)}"]
-                recommendations = ["Review draft orders with suppliers."]
+            return {
+                "direct_answer": direct_answer,
+                "executive_summary": "",
+                "insights": [f"PO Reference: {name_1}", f"Supplier: {partner_1}", f"Total: {amount_1}"],
+                "recommendations": [f"Check delivery timeline for order {name_1}."],
+            }
         elif is_lowest:
             if is_ml:
                 direct_answer = f"ഏറ്റവും കുറഞ്ഞ തുകയുള്ള പർച്ചേസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1})."
-                executive_summary = f"കുറഞ്ഞ തുകയുള്ള പർച്ചേസ് ഓർഡർ {name_1} കണ്ടെത്തി."
-                insights = [f"ഓർഡർ: {name_1}", f"സപ്ലയർ: {partner_1}", f"തുക: {amount_1}"]
-                recommendations = ["ഓർഡർ പരിശോധിക്കുക."]
             else:
                 direct_answer = f"The lowest value purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Order date: {date_1})."
-                executive_summary = f"Retrieved lowest purchase order {name_1}."
-                insights = [f"PO: {name_1}", f"Supplier: {partner_1}", f"Amount: {amount_1}"]
-                recommendations = ["Review minimum order quantities."]
+            return {
+                "direct_answer": direct_answer,
+                "executive_summary": "",
+                "insights": [f"PO: {name_1}", f"Supplier: {partner_1}", f"Amount: {amount_1}"],
+                "recommendations": ["Review minimum order quantities."],
+            }
         else:
             if is_ml:
-                direct_answer = (
-                    f"ഏറ്റവും ഉയർന്ന തുകയുള്ള പർച്ചേസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). ആകെ തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1}, സ്റ്റാറ്റസ്: {status_1})."
-                )
-                executive_summary = f"പ്രധാന പർച്ചേസ് ഓർഡർ {name_1} ({amount_1}) കണ്ടെത്തി."
-                insights = [
-                    f"പ്രധാന പർച്ചേസ് ഓർഡർ: {name_1} ({partner_1}) - {amount_1}",
-                    f"ആകെ പർച്ചേസ് ബാധ്യത: {_cur(total_val)}",
-                ]
-                recommendations = [
-                    "മെറ്റീരിയൽ കൃത്യസമയത്ത് ലഭിക്കാൻ സപ്ലയർ ഡെലിവറി തീയതി ഉറപ്പാക്കുക.",
-                ]
+                direct_answer = f"ഏറ്റവും ഉയർന്ന തുകയുള്ള പർച്ചേസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). ആകെ തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1}, സ്റ്റാറ്റസ്: {status_1})."
             else:
-                direct_answer = (
-                    f"The highest value purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Status: {status_1})."
-                )
-                executive_summary = (
-                    f"Top procurement commitment is {name_1} representing {amount_1}."
-                )
-                insights = [
-                    f"Top purchase order: {name_1} ({partner_1}) at {amount_1}",
-                    f"Total procurement volume: {_cur(total_val)}",
-                ]
-                recommendations = [
-                    "Review unconfirmed draft purchase orders with suppliers.",
-                ]
+                direct_answer = f"The highest value purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Status: {status_1})."
+            return {
+                "direct_answer": direct_answer,
+                "executive_summary": "",
+                "insights": [f"Top purchase order: {name_1} ({partner_1}) at {amount_1}", f"Total procurement volume: {_cur(total_val)}"],
+                "recommendations": ["Review unconfirmed draft purchase orders with suppliers."],
+            }
 
     elif entity == "project":
         lead_user = top_record.get("user_id")
@@ -1516,64 +1614,75 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
     elif entity == "sale_order":
         amount_1 = _cur(top_record.get("amount_total", 0))
         date_1 = str(top_record.get("date_order", "N/A"))[:10]
+        time_suffix = plan.get("time_title_suffix") or ("last month" if plan.get("is_last_month") else "the selected period")
 
-        if is_recent or any(w in p_lower for w in ["last", "latest", "recent", "ലാസ്റ്റ്", "ലേറ്റസ്റ്റ്", "അവസാന"]):
+        if (has_timeframe or is_count) and not is_recent:
+            confirmed_orders = [r for r in records if r.get("state") in ["sale", "done"]]
+            draft_orders = [r for r in records if r.get("state") in ["draft", "sent"]]
+            total_count = len(records)
+            confirmed_count = len(confirmed_orders)
+            draft_count = len(draft_orders)
+            confirmed_val = sum(float(r.get("amount_total", 0) or 0) for r in confirmed_orders)
+            draft_val = sum(float(r.get("amount_total", 0) or 0) for r in draft_orders)
+
+            if is_ml:
+                direct_answer = (
+                    f"{time_suffix}-ൽ ആകെ **{total_count} സെയിൽസ് ഓർഡറുകൾ** രൂപീകരിച്ചിട്ടുണ്ട് (ആകെ മൂല്യം: **{_cur(total_val)}**). "
+                    f"ഇതിൽ **{confirmed_count} കൺഫേം ചെയ്ത ഓർഡറുകളും** ({_cur(confirmed_val)}) "
+                    f"**{draft_count} ഡ്രാഫ്റ്റ് കൊട്ടേഷനുകളും** ({_cur(draft_val)}) ഉൾപ്പെടുന്നു."
+                )
+            else:
+                direct_answer = (
+                    f"In **{time_suffix}**, there were **{total_count} sales orders** created in your Odoo system totaling **{_cur(total_val)}** "
+                    f"(comprising **{confirmed_count} confirmed sales orders** worth {_cur(confirmed_val)} "
+                    f"and **{draft_count} draft quotations** worth {_cur(draft_val)})."
+                )
+            return {
+                "direct_answer": direct_answer,
+                "executive_summary": "",
+                "insights": [
+                    f"Total orders: {total_count}",
+                    f"Confirmed sales: {confirmed_count} ({_cur(confirmed_val)})",
+                    f"Quotations: {draft_count} ({_cur(draft_val)})",
+                ],
+                "recommendations": [
+                    "Follow up on open quotations to drive conversions."
+                ],
+            }
+
+        elif is_recent:
             if is_ml:
                 direct_answer = f"അവസാനമായി ചെയ്ത ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1})."
-                executive_summary = ""
-                insights = [
-                    f"ഓർഡർ നമ്പർ: {name_1}",
-                    f"കസ്റ്റമർ: {partner_1}",
-                    f"ഓർഡർ തുക: {amount_1}",
-                ]
-                recommendations = [
-                    f"ഓർഡർ {name_1} ന്റെ സ്റ്റാറ്റസും ഡെലിവറിയും നിരീക്ഷിക്കുക.",
-                ]
             else:
                 direct_answer = f"The last order made is **{name_1}** from **{partner_1}** for **{amount_1}** (Ordered: {date_1})."
-                executive_summary = ""
-                insights = [
-                    f"Order reference: {name_1}",
-                    f"Customer: {partner_1}",
-                    f"Order total: {amount_1}",
-                ]
-                recommendations = [
-                    f"Ensure timely delivery and customer follow-up for order {name_1}.",
-                ]
+            return {
+                "direct_answer": direct_answer,
+                "executive_summary": "",
+                "insights": [f"Order reference: {name_1}", f"Customer: {partner_1}", f"Order total: {amount_1}"],
+                "recommendations": [f"Ensure timely delivery and customer follow-up for order {name_1}."],
+            }
         elif is_lowest:
             if is_ml:
                 direct_answer = f"ഏറ്റവും കുറഞ്ഞ തുകയുള്ള സെയിൽസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (തീയതി: {date_1})."
-                executive_summary = f"കുറഞ്ഞ മൂല്യമുള്ള സെയിൽസ് ഓർഡർ {name_1} ({amount_1}) കണ്ടെത്തി."
-                insights = [f"ഓർഡർ: {name_1}", f"കസ്റ്റമർ: {partner_1}", f"തുക: {amount_1}"]
-                recommendations = ["ചെറിയ ഓർഡറുകളുടെ പ്രോസസ്സിംഗ് വേഗത്തിലാക്കുക."]
             else:
                 direct_answer = f"The lowest value sales order is **{name_1}** from **{partner_1}** for **{amount_1}** (Ordered: {date_1})."
-                executive_summary = f"Retrieved lowest value sales order {name_1} representing {amount_1}."
-                insights = [f"Lowest order: {name_1}", f"Customer: {partner_1}", f"Amount: {amount_1}"]
-                recommendations = ["Optimize handling costs for smaller order tickets."]
-        elif is_count:
-            if is_ml:
-                direct_answer = f"നിങ്ങളുടെ സിസ്റ്റത്തിൽ ആകെ **{len(records)} സെയിൽസ് ഓർഡറുകൾ** ഉണ്ട് (ആകെ തുക: **{_cur(total_val)}**)."
-                executive_summary = f"ആകെ {len(records)} സെയിൽസ് ഓർഡറുകൾ കണ്ടെത്തി."
-                insights = [f"ആകെ ഓർഡറുകൾ: {len(records)}", f"ആകെ ബിസിനസ്സ്: {_cur(total_val)}", f"ശരാശരി തുക: {_cur(total_val / len(records))}"]
-                recommendations = ["ഓർഡർ പ്രോസസ്സിംഗ് വേഗത്തിലാക്കുക."]
-            else:
-                direct_answer = f"There are **{len(records)} confirmed sales orders** recorded in your system totaling **{_cur(total_val)}**."
-                executive_summary = f"Identified {len(records)} confirmed sales orders representing {_cur(total_val)} in gross sales volume."
-                insights = [f"Total orders: {len(records)}", f"Total volume: {_cur(total_val)}", f"Average size: {_cur(total_val / len(records))}"]
-                recommendations = ["Monitor order fulfillment pipelines."]
+            return {
+                "direct_answer": direct_answer,
+                "executive_summary": "",
+                "insights": [f"Lowest order: {name_1}", f"Customer: {partner_1}", f"Amount: {amount_1}"],
+                "recommendations": ["Optimize handling costs for smaller order tickets."],
+            }
         else:
-            # Highest Value (Default)
             if is_ml:
                 direct_answer = f"ഏറ്റവും ഉയർന്ന തുകയുള്ള സെയിൽസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). തുക: **{amount_1}** (തീയതി: {date_1})."
-                executive_summary = f"ഏറ്റവും ഉയർന്ന മൂല്യമുള്ള സെയിൽസ് ഓർഡർ {name_1} ({amount_1}) വിജയകരമായി കണ്ടെത്തി."
-                insights = [f"ടോപ്പ് ഓർഡർ: {name_1} ({partner_1}) - {amount_1}", f"ആകെ സെയിൽസ് മൂല്യം: {_cur(total_val)}"]
-                recommendations = [f"ക്ലയന്റ് {partner_1} ന് മുൻഗണന നൽകി ഡെലിവറി പൂർത്തിയാക്കുക."]
             else:
                 direct_answer = f"The highest value sales order is **{name_1}** from **{partner_1}** for **{amount_1}** (Ordered: {date_1})."
-                executive_summary = f"Identified top sales order {name_1} representing {amount_1}."
-                insights = [f"Top order: {name_1} with {partner_1} ({amount_1})", f"Total sales volume: {_cur(total_val)}"]
-                recommendations = [f"Ensure timely fulfillment and VIP onboarding for client {partner_1}."]
+            return {
+                "direct_answer": direct_answer,
+                "executive_summary": "",
+                "insights": [f"Top order: {name_1} with {partner_1} ({amount_1})", f"Total sales volume: {_cur(total_val)}"],
+                "recommendations": [f"Ensure timely fulfillment and VIP onboarding for client {partner_1}."],
+            }
 
     elif entity == "customer":
         inv_val = _cur(top_record.get("total_invoiced", 0))
