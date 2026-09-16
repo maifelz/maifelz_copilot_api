@@ -1,0 +1,43 @@
+{
+  "tenant-default-001": {
+    "id": "tenant-default-001",
+    "company_name": "Billabong Solar",
+    "contact_email": "nithin@billabongsolar.com.au",
+    "license_key": "MFZ-PRO-2026-BILLA-8891",
+    "plan": "professional",
+    "monthly_limit": 2500,
+    "queries_used": 0,
+    "status": "active",
+    "connection_id": "2d091f19-a1b9-4e26-9d76-ddec304a4b50",
+    "created_at": "2026-09-16T08:10:55.744029",
+    "expires_at": "2027-09-16T08:10:55.744215",
+    "last_query_at": "2026-09-16T09:13:42.487369",
+    "notes": "Founding Pilot Client",
+    "user_logins": [
+      {
+        "email": "nithin@billanongsolar.com.au",
+        "name": "Nithin",
+        "role": "admin",
+        "created_at": "2026-09-16T08:31:17.371029",
+        "status": "active",
+        "password": "Solar2026!"
+      }
+    ],
+    "seats_count": 1
+  },
+  "tenant-c9b9f852": {
+    "id": "tenant-c9b9f852",
+    "company_name": "Acme Industrial ERP",
+    "contact_email": "ceo@acme.com",
+    "license_key": "MFZ-STA-2026-0AD8",
+    "plan": "starter",
+    "monthly_limit": 500,
+    "queries_used": 0,
+    "status": "suspended",
+    "connection_id": "",
+    "created_at": "2026-09-16T08:12:28.307781",
+    "expires_at": "2026-10-16T08:12:28.307784",
+    "last_query_at": null,
+    "notes": "New client onboarding"
+  }
+}

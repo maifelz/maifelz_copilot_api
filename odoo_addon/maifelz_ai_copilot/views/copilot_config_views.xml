@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Dedicated Form View for mAifelZ License & Connection -->
+    <record id="view_maifelz_copilot_config_form" model="ir.ui.view">
+        <field name="name">maifelz.copilot.config.form</field>
+        <field name="model">maifelz.copilot.config</field>
+        <field name="arch" type="xml">
+            <form string="mAifelZ AI Copilot License &amp; Connection">
+                <header>
+                    <button name="action_verify_license"
+                            type="object"
+                            string="Verify &amp; Connect License"
+                            class="btn-primary"
+                            icon="fa-check-circle"/>
+                    <button name="action_open_portal"
+                            type="object"
+                            string="Launch mAifelZ AI Portal"
+                            class="btn-secondary"
+                            icon="fa-external-link"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,active"/>
+                </header>
+                <sheet>
+                    <div class="oe_title mb-4">
+                        <label for="name" class="oe_edit_only" string="Connection Label"/>
+                        <h1>
+                            <field name="name" placeholder="e.g. mAifelZ AI Copilot Connection"/>
+                        </h1>
+                    </div>
+
+                    <group>
+                        <group string="License Credentials">
+                            <field name="license_key"
+                                   placeholder="MFZ-PRO-2026-XXXX"
+                                   style="font-family: monospace; font-weight: bold;"/>
+                            <field name="server_url"
+                                   placeholder="http://localhost:3000"/>
+                        </group>
+                        <group string="Subscription Status">
+                            <field name="plan_name"/>
+                            <field name="company_name"/>
+                            <field name="last_verified_at"/>
+                        </group>
+                    </group>
+
+                    <div class="alert alert-info mt-4" role="alert">
+                        <strong>mAifelZ Cloud AI Copilot:</strong> Enter the License Key provided in your mAifelZ Admin console.
+                        Once verified, authorized employee seats log in directly at your Portal URL with their individual work email and password.
+                    </div>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- Action that always opens the single config record directly -->
+    <record id="action_maifelz_open_config" model="ir.actions.server">
+        <field name="name">mAifelZ AI Copilot</field>
+        <field name="model_id" ref="maifelz_ai_copilot.model_maifelz_copilot_config"/>
+        <field name="state">code</field>
+        <field name="code">
+action = model.action_open_config_screen()
+        </field>
+    </record>
+</odoo>

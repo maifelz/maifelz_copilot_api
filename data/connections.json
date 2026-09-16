@@ -1,0 +1,15 @@
+{
+  "2d091f19-a1b9-4e26-9d76-ddec304a4b50": {
+    "id": "2d091f19-a1b9-4e26-9d76-ddec304a4b50",
+    "url": "https://fahad-rm-billa-bong-billatest-37743430.dev.odoo.com",
+    "database": "fahad-rm-billa-bong-billatest-37743430",
+    "username": "nithin@billabongsolar.com.au",
+    "password": "123",
+    "label": "Billabong",
+    "uid": 2,
+    "odoo_version": "19.0+e",
+    "company_name": "Billabong Solar",
+    "created_at": "2026-09-16T07:36:28.968378",
+    "last_used": "2026-09-16T07:36:28.968384"
+  }
+}

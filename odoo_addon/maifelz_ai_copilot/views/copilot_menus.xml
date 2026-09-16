@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Top Menu: mAifelZ AI Copilot -->
+    <menuitem id="menu_maifelz_copilot_root"
+              name="mAifelZ AI Copilot"
+              web_icon="maifelz_ai_copilot,static/description/icon.png"
+              sequence="1"/>
+
+    <!-- Submenu: License & Connection (Opens the License Verification Form) -->
+    <menuitem id="menu_maifelz_copilot_license"
+              name="License &amp; Connection"
+              parent="menu_maifelz_copilot_root"
+              action="action_maifelz_open_config"
+              sequence="10"/>
+
+    <!-- Submenu: Launch Portal Directly in New Tab -->
+    <menuitem id="menu_maifelz_copilot_launch_direct"
+              name="Open AI Copilot Portal"
+              parent="menu_maifelz_copilot_root"
+              action="action_open_maifelz_portal_server"
+              sequence="20"/>
+</odoo>
