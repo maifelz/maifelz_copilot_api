@@ -88,6 +88,7 @@ class AIReportResponse(BaseModel):
     raw_data_available: bool
     clarification_question: Optional[str] = None
     follow_up_suggestions: Optional[List[str]] = None
+    language: Optional[str] = "en"
     error: Optional[str] = None
 
 

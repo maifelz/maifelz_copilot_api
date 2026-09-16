@@ -52,6 +52,9 @@ PROMPT_TO_QUERY_PROMPT = """You are an expert AI data analyst for an Odoo ERP da
 Today's Date: {today}
 User Query: "{query}"
 
+IMPORTANT MULTILINGUAL INSTRUCTION:
+The user query may be in English, Malayalam (മലയാളം, e.g. "ഏറ്റവും കൂടുതൽ തുകയുള്ള പർച്ചേസ് ഓർഡർ ഏതാണ്?", "യൂസേഴ്സ് എത്ര ഉണ്ട്?"), Hindi, Arabic, or another language. Understand the user's intent regardless of the language and map it accurately to the appropriate Odoo model, domain, and fields.
+
 Translate this query into an Odoo ORM search plan.
 Common Odoo models:
 - res.users: Odoo System Users & Logins (name, login, active, share, create_date) - query this when user asks about users, logins, system access, how many users configured. Use domain [["share", "=", False]] for internal company users.
@@ -94,8 +97,15 @@ Here are the real records retrieved from the user's Odoo ERP system:
 
 Total matching records count: {total_count}
 
+MULTILINGUAL RESPONSE REQUIREMENT:
+- Detect the language of the user's question: "ml" for Malayalam (മലയാളം), "hi" for Hindi, "ar" for Arabic, "en" for English, etc.
+- If the question is in Malayalam (മലയാളം), formulate the "direct_answer", "executive_summary", "insights", "recommendations", "clarification_question", and "follow_up_suggestions" COMPLETELY in natural, fluent Malayalam script. Keep partner names, reference codes (like P01061), and numerical figures precise and clear.
+- If the question is in English, respond in English.
+- If the question is in another language, respond in that language.
+
 Provide an executive analysis in valid JSON (no markdown):
 {{
+  "detected_language": "en",
   "direct_answer": "1-2 sentences directly answering the user's question with exact numbers, names, dates, or items from the data. If user asked 'how many', give the exact count first.",
   "executive_summary": "2-3 sentences summarizing the broader context and totals from these records.",
   "insights": [
@@ -106,6 +116,12 @@ Provide an executive analysis in valid JSON (no markdown):
   "recommendations": [
     "Actionable executive advice #1",
     "Actionable executive advice #2"
+  ],
+  "clarification_question": "Proactive follow-up question in the query language to offer deeper drill-down",
+  "follow_up_suggestions": [
+    "Suggested follow-up query 1 in query language",
+    "Suggested follow-up query 2 in query language",
+    "Suggested follow-up query 3 in query language"
   ]
 }}
 """
@@ -172,7 +188,28 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
     kpi_cards = _build_kpi_cards(raw_data, query_plan)
 
     # Interactive Chatter: Clarification question & smart follow-up suggestions
-    clarification_q, follow_ups = _build_chatter_clarifications(prompt, raw_data, query_plan)
+    clarification_q = None
+    follow_ups = None
+    if synthesis:
+        clarification_q = synthesis.get("clarification_question")
+        follow_ups = synthesis.get("follow_up_suggestions")
+
+    if not clarification_q or not follow_ups:
+        fallback_q, fallback_f = _build_chatter_clarifications(prompt, raw_data, query_plan)
+        clarification_q = clarification_q or fallback_q
+        follow_ups = follow_ups or fallback_f
+
+    # Language identification
+    detected_lang = "en"
+    if any('\u0D00' <= c <= '\u0D7F' for c in prompt):
+        detected_lang = "ml"
+    elif any('\u0600' <= c <= '\u06FF' for c in prompt):
+        detected_lang = "ar"
+    elif any('\u0900' <= c <= '\u097F' for c in prompt):
+        detected_lang = "hi"
+
+    if synthesis and synthesis.get("detected_language"):
+        detected_lang = synthesis.get("detected_language")
 
     return {
         "success": error_message is None,
@@ -198,6 +235,7 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
         "recommendations": synthesis.get("recommendations", []),
         "clarification_question": clarification_q,
         "follow_up_suggestions": follow_ups,
+        "language": detected_lang,
         "raw_data_available": len(raw_data) > 0,
         "error": error_message,
     }
