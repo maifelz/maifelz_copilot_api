@@ -20,10 +20,16 @@ class MaifelzCopilotConfig(models.Model):
         help='Enter the subscription license key issued by mAifelZ Technologies.'
     )
     server_url = fields.Char(
-        string='mAifelZ Portal URL',
-        default='http://localhost:3000',
+        string='mAifelZ Cloud API URL',
+        default='https://maifelz-copilot-api.onrender.com',
         required=True,
-        help='The portal URL for mAifelZ AI Copilot. Use http://localhost:3000 for local testing, or https://copilot.maifelz.com in production.'
+        help='The cloud API endpoint for mAifelZ AI Copilot verification.'
+    )
+    portal_url = fields.Char(
+        string='mAifelZ Web Portal URL',
+        default='https://maifelz-copilot-web.vercel.app',
+        required=True,
+        help='The web portal URL where employee seats log in to query AI.'
     )
     state = fields.Selection([
         ('draft', 'Not Verified'),
@@ -43,7 +49,8 @@ class MaifelzCopilotConfig(models.Model):
             record = self.create({
                 'name': 'mAifelZ AI Copilot License',
                 'license_key': 'MFZ-PRO-2026-BILLA-8891',
-                'server_url': 'http://localhost:3000',
+                'server_url': 'https://maifelz-copilot-api.onrender.com',
+                'portal_url': 'https://maifelz-copilot-web.vercel.app',
             })
         return {
             'type': 'ir.actions.act_window',
@@ -55,16 +62,16 @@ class MaifelzCopilotConfig(models.Model):
         }
 
     def action_verify_license(self):
-        """Validate license key with mAifelZ Cloud server."""
+        """Validate license key strictly against live mAifelZ Cloud API."""
         self.ensure_one()
         license_key = (self.license_key or '').strip()
-        server_url = (self.server_url or 'http://localhost:3000').rstrip('/')
+        server_url = (self.server_url or 'https://maifelz-copilot-api.onrender.com').rstrip('/')
 
         if not license_key:
             raise UserError(_("Please enter your mAifelZ License Key before verifying."))
 
         base_url = self.env['ir.config_parameter'].sudo().get_param('web.base.url', '')
-        client_company = self.env.company.name if hasattr(self.env, 'company') else 'Billabong Solar'
+        client_company = self.env.company.name if hasattr(self.env, 'company') else 'Client Enterprise'
 
         payload = {
             "license_key": license_key,
@@ -74,9 +81,9 @@ class MaifelzCopilotConfig(models.Model):
         }
 
         try:
-            resp = requests.post(f"{server_url}/api/v1/admin/odoo-handshake", json=payload, timeout=8)
+            resp = requests.post(f"{server_url}/api/v1/admin/odoo-handshake", json=payload, timeout=12)
             if resp.status_code == 404:
-                resp = requests.post(f"{server_url}/api/v1/admin/verify-license", json={"license_key": license_key}, timeout=8)
+                resp = requests.post(f"{server_url}/api/v1/admin/verify-license", json={"license_key": license_key}, timeout=12)
 
             if resp.status_code == 200:
                 data = resp.json()
@@ -93,7 +100,7 @@ class MaifelzCopilotConfig(models.Model):
                     'tag': 'display_notification',
                     'params': {
                         'title': _('License Verified & Connected!'),
-                        'message': _('Successfully connected %s (%s). You can now open the Copilot Portal.') % (
+                        'message': _('Successfully connected %s (%s). Authorized seats can now log in.') % (
                             self.company_name, self.plan_name
                         ),
                         'type': 'success',
@@ -101,39 +108,25 @@ class MaifelzCopilotConfig(models.Model):
                     }
                 }
             else:
-                data = resp.json() if resp.status_code in [400, 403] else {}
-                detail = data.get('detail', 'Verification failed.')
-                self.write({'state': 'error'})
-                raise UserError(_("mAifelZ License Error: %s") % detail)
+                try:
+                    data = resp.json()
+                    detail = data.get('detail', 'Invalid or unrecognized license key.')
+                except Exception:
+                    detail = 'Invalid license key.'
+                self.write({'state': 'error', 'plan_name': 'Invalid License'})
+                raise UserError(_("mAifelZ Cloud Verification Failed: %s\n\nPlease check your key or contact billing@maifelz.com.") % detail)
 
         except requests.exceptions.RequestException as e:
-            _logger.warning("Handshake note: %s", str(e))
-            # Graceful local fallback for local development / testing
-            self.write({
-                'state': 'active',
-                'plan_name': 'Professional Plan (Verified)',
-                'company_name': client_company or 'Billabong Solar',
-                'last_verified_at': fields.Datetime.now(),
-            })
-            self.env['ir.config_parameter'].sudo().set_param('maifelz_ai_copilot.license_key', license_key)
-            self.env['ir.config_parameter'].sudo().set_param('maifelz_ai_copilot.server_url', server_url)
-            return {
-                'type': 'ir.actions.client',
-                'tag': 'display_notification',
-                'params': {
-                    'title': _('License Activated'),
-                    'message': _('License key %s saved and verified! You can test the portal at %s/login.') % (license_key, server_url),
-                    'type': 'success',
-                    'sticky': False,
-                }
-            }
+            _logger.error("mAifelZ Cloud unreachable: %s", str(e))
+            self.write({'state': 'error'})
+            raise UserError(_("Could not reach mAifelZ Cloud verification server at %s.\nError: %s\nPlease check your internet connection or server URL.") % (server_url, str(e)))
 
     def action_open_portal(self):
         """Opens the Copilot portal in a new browser tab."""
         self.ensure_one()
-        server_url = (self.server_url or 'http://localhost:3000').rstrip('/')
+        target_url = (self.portal_url or 'https://maifelz-copilot-web.vercel.app').rstrip('/')
         return {
             'type': 'ir.actions.act_url',
-            'url': f"{server_url}/login",
+            'url': f"{target_url}/login",
             'target': 'new',
         }
