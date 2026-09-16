@@ -57,10 +57,13 @@ Common Odoo models:
 - res.users: Odoo System Users & Logins (name, login, active, share, create_date) - query this when user asks about users, logins, system access, how many users configured. Use domain [["share", "=", False]] for internal company users.
 - hr.employee: HR Employees & Staff (name, work_email, department_id, job_title, work_phone)
 - crm.lead: CRM Pipeline & Leads (name, partner_id, partner_name, expected_revenue, stage_id, probability, user_id, create_date, type='opportunity' or 'lead', phone, email_from)
+- purchase.order: Purchase orders & Procurement (name, partner_id, amount_total, date_order, state, user_id)
+- project.project: Projects & installations (name, partner_id, user_id, task_count, date_start, privacy_visibility)
+- project.task: Project Tasks & Milestones (name, project_id, user_ids, stage_id, priority, date_deadline)
 - account.move: Invoices & bills (move_type='out_invoice' for customer invoices, 'in_invoice' for vendor bills, amount_total, invoice_date, payment_state, partner_id, name, state='posted')
 - sale.order: Sales orders (amount_total, date_order, partner_id, user_id, state='sale' or 'done', name)
+- stock.picking: Shipments, deliveries & receipts (name, partner_id, picking_type_id, state, scheduled_date, origin)
 - stock.quant: Inventory stock (product_id, quantity, location_id)
-- purchase.order: Purchase orders (partner_id, amount_total, date_order, state, name)
 - res.partner: Customers & vendors (name, email, phone, total_invoiced, customer_rank)
 - product.product: Products (name, list_price, standard_price, qty_available)
 
@@ -368,6 +371,104 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_count": is_count,
         }
 
+    elif any(w in p for w in ["purchase", "po", "procurement", "vendor order", "supplier order", "buying"]):
+        domain = []
+        if "draft" in p:
+            domain.append(["state", "=", "draft"])
+        elif "done" in p or "confirmed" in p:
+            domain.append(["state", "in", ["purchase", "done"]])
+
+        if is_today:
+            domain.append(["date_order", ">=", today.strftime("%Y-%m-%d 00:00:00")])
+        elif is_this_month:
+            start_month = today.replace(day=1).strftime("%Y-%m-%d")
+            domain.append(["date_order", ">=", start_month])
+
+        order = "date_order desc" if is_recent else f"amount_total {order_dir}"
+        return {
+            "entity_type": "purchase_order",
+            "report_title": "Purchase Orders & Procurement",
+            "model": "purchase.order",
+            "domain": domain,
+            "fields": ["name", "partner_id", "amount_total", "date_order", "state", "user_id"],
+            "order": order,
+            "limit": 30,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["amount_total"],
+            "date_field": "date_order",
+            "value_field": "amount_total",
+            "is_today": is_today,
+            "is_recent": is_recent,
+            "is_count": is_count,
+        }
+
+    elif any(w in p for w in ["project", "projects", "installation", "installations"]):
+        domain = []
+        order = "id desc" if is_recent else "name asc"
+        return {
+            "entity_type": "project",
+            "report_title": "Project Operations & Status",
+            "model": "project.project",
+            "domain": domain,
+            "fields": ["name", "partner_id", "user_id", "task_count", "date_start", "privacy_visibility"],
+            "order": order,
+            "limit": 35,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["task_count"],
+            "date_field": "date_start",
+            "value_field": "task_count",
+            "is_today": is_today,
+            "is_recent": is_recent,
+            "is_count": is_count,
+        }
+
+    elif any(w in p for w in ["task", "tasks", "milestone", "todo", "action item"]):
+        domain = []
+        return {
+            "entity_type": "task",
+            "report_title": "Project Tasks & Milestones",
+            "model": "project.task",
+            "domain": domain,
+            "fields": ["name", "project_id", "user_ids", "stage_id", "priority", "date_deadline"],
+            "order": "date_deadline asc" if "due" in p or "deadline" in p else "id desc",
+            "limit": 35,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["id"],
+            "date_field": "date_deadline",
+            "value_field": "id",
+            "is_today": is_today,
+            "is_recent": is_recent,
+            "is_count": is_count,
+        }
+
+    elif any(w in p for w in ["delivery", "deliveries", "shipment", "shipments", "picking", "transfer", "transfers", "dispatch", "receipt", "receipts"]):
+        domain = []
+        if "pending" in p or "waiting" in p:
+            domain.append(["state", "in", ["assigned", "waiting", "confirmed"]])
+        elif "done" in p or "completed" in p:
+            domain.append(["state", "=", "done"])
+
+        return {
+            "entity_type": "stock_picking",
+            "report_title": "Warehouse Shipments & Deliveries",
+            "model": "stock.picking",
+            "domain": domain,
+            "fields": ["name", "partner_id", "picking_type_id", "state", "scheduled_date", "origin"],
+            "order": "scheduled_date desc" if is_recent else "id desc",
+            "limit": 30,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["id"],
+            "date_field": "scheduled_date",
+            "value_field": "id",
+            "is_today": is_today,
+            "is_recent": is_recent,
+            "is_count": is_count,
+        }
+
     elif any(w in p for w in ["order", "sale", "quotation", "revenue"]):
         domain = [["state", "in", ["sale", "done"]]]
         if is_today:
@@ -604,6 +705,82 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
             "Establish automated payment reminders for invoices over $10,000.",
         ]
 
+    elif entity == "purchase_order":
+        amount_1 = _cur(top_record.get("amount_total", 0))
+        date_1 = str(top_record.get("date_order", "N/A"))[:10]
+        status_1 = str(top_record.get("state") or "draft").replace("_", " ").title()
+        direct_answer = (
+            f"You have **{len(records)} purchase order{'s' if len(records) != 1 else ''}** recorded totaling **{_cur(total_val)}**. "
+            f"The primary purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Status: {status_1})."
+        )
+        executive_summary = (
+            f"Analyzed {len(records)} procurement records representing {_cur(total_val)} in total vendor commitments."
+        )
+        insights = [
+            f"Top purchase order: {name_1} ({partner_1}) at {amount_1}",
+            f"Total procurement volume in this group: {_cur(total_val)}",
+            f"Average PO commitment: {_cur(total_val / len(records))}",
+        ]
+        recommendations = [
+            "Review unconfirmed draft purchase orders with suppliers to ensure on-time delivery schedules.",
+            "Consolidate volume orders with preferred vendors to capture tiered pricing discounts.",
+        ]
+
+    elif entity == "project":
+        lead_user = top_record.get("user_id")
+        lead_str = lead_user[1] if isinstance(lead_user, list) and len(lead_user) == 2 else str(lead_user or "Unassigned")
+        direct_answer = (
+            f"There are **{len(records)} active projects** configured in your Odoo system. "
+            f"A key project is **{name_1}** (Client: **{partner_1}**, Project Lead: **{lead_str}**)."
+        )
+        executive_summary = (
+            f"Tracking {len(records)} project initiatives across customer installations, service jobs, and ongoing operations."
+        )
+        insights = [
+            f"Total active projects: {len(records)}",
+            f"Primary active installation: {name_1} (Client: {partner_1})",
+            f"Key project manager: {lead_str}",
+        ]
+        recommendations = [
+            "Conduct weekly milestone reviews with assigned project leads to maintain on-time completion.",
+            "Ensure signed customer handover certificates are uploaded before triggering final billing.",
+        ]
+
+    elif entity == "task":
+        stage = top_record.get("stage_id")
+        stage_str = stage[1] if isinstance(stage, list) and len(stage) == 2 else str(stage or "In Progress")
+        direct_answer = (
+            f"Found **{len(records)} operational task{'s' if len(records) != 1 else ''}** in your system. "
+            f"Latest task: **{name_1}** (Stage: **{stage_str}**)."
+        )
+        executive_summary = f"Tracking {len(records)} tasks and milestones across your team's project pipeline."
+        insights = [
+            f"Total tasks tracked: {len(records)}",
+            f"Latest task in review: {name_1}",
+        ]
+        recommendations = [
+            "Prioritize tasks nearing their scheduled deadlines.",
+            "Assign unallocated tasks to balance workload across technicians.",
+        ]
+
+    elif entity == "stock_picking":
+        op_type = top_record.get("picking_type_id")
+        op_str = op_type[1] if isinstance(op_type, list) and len(op_type) == 2 else "Transfer"
+        status_1 = str(top_record.get("state") or "draft").replace("_", " ").title()
+        direct_answer = (
+            f"Retrieved **{len(records)} warehouse transfers and shipments**. "
+            f"Latest operation is **{name_1}** ({op_str}, Status: **{status_1}**)."
+        )
+        executive_summary = f"Monitoring {len(records)} logistics movements across warehouse receipts, internal transfers, and customer deliveries."
+        insights = [
+            f"Total transfers monitored: {len(records)}",
+            f"Latest logistics operation: {name_1} ({op_str})",
+        ]
+        recommendations = [
+            "Expedite validation of pending receipts to keep stock levels synchronized with sales demand.",
+            "Review cancelled and backlog pickings to resolve inventory discrepancies.",
+        ]
+
     elif entity == "sale_order":
         amount_1 = _cur(top_record.get("amount_total", 0))
         date_1 = top_record.get("date_order", "N/A")[:10]
@@ -659,12 +836,12 @@ def _build_chart_data(records: List[Dict], plan: Dict) -> List[Dict]:
     if not records:
         return []
 
-    if plan.get("entity_type") == "user":
+    if plan.get("entity_type") in ["user", "task", "stock_picking"]:
         return [
             {
-                "label": r.get("name", "User")[:20],
+                "label": str(r.get("name") or "Item")[:22],
                 "value": 1,
-                "name": r.get("name", "User")[:20],
+                "name": str(r.get("name") or "Item")[:22],
             }
             for r in records[:15]
         ]
@@ -787,6 +964,102 @@ def _build_table_data(records: List[Dict], plan: Dict) -> tuple:
             })
         return rows, columns
 
+    elif entity == "purchase_order":
+        columns = [
+            {"key": "name", "label": "PO #", "type": "text"},
+            {"key": "partner", "label": "Vendor / Supplier", "type": "text"},
+            {"key": "date", "label": "Order Date", "type": "date"},
+            {"key": "amount_total", "label": "Total Amount", "type": "currency"},
+            {"key": "user", "label": "Buyer / Rep", "type": "text"},
+            {"key": "state", "label": "Status", "type": "badge"},
+        ]
+        rows = []
+        for r in records:
+            p = r.get("partner_id")
+            p_name = p[1] if isinstance(p, list) and len(p) == 2 else str(p or "-")
+            u = r.get("user_id")
+            u_name = u[1] if isinstance(u, list) and len(u) == 2 else str(u or "-")
+            rows.append({
+                "name": r.get("name", "-"),
+                "partner": p_name,
+                "date": str(r.get("date_order") or "-")[:10],
+                "amount_total": float(r.get("amount_total", 0) or 0),
+                "user": u_name,
+                "state": str(r.get("state") or "draft").replace("_", " ").title(),
+            })
+        return rows, columns
+
+    elif entity == "project":
+        columns = [
+            {"key": "name", "label": "Project Name", "type": "text"},
+            {"key": "partner", "label": "Client / Partner", "type": "text"},
+            {"key": "user", "label": "Project Lead", "type": "text"},
+            {"key": "task_count", "label": "Tasks", "type": "number"},
+            {"key": "visibility", "label": "Access", "type": "badge"},
+        ]
+        rows = []
+        for r in records:
+            p = r.get("partner_id")
+            p_name = p[1] if isinstance(p, list) and len(p) == 2 else str(p or "-")
+            u = r.get("user_id")
+            u_name = u[1] if isinstance(u, list) and len(u) == 2 else str(u or "-")
+            rows.append({
+                "name": r.get("name", "-"),
+                "partner": p_name,
+                "user": u_name,
+                "task_count": int(r.get("task_count", 0) or 0),
+                "visibility": str(r.get("privacy_visibility") or "portal").title(),
+            })
+        return rows, columns
+
+    elif entity == "task":
+        columns = [
+            {"key": "name", "label": "Task Name", "type": "text"},
+            {"key": "project", "label": "Project", "type": "text"},
+            {"key": "stage", "label": "Stage", "type": "badge"},
+            {"key": "priority", "label": "Priority", "type": "badge"},
+            {"key": "date", "label": "Deadline", "type": "date"},
+        ]
+        rows = []
+        for r in records:
+            prj = r.get("project_id")
+            prj_name = prj[1] if isinstance(prj, list) and len(prj) == 2 else str(prj or "-")
+            stg = r.get("stage_id")
+            stg_name = stg[1] if isinstance(stg, list) and len(stg) == 2 else str(stg or "New")
+            rows.append({
+                "name": r.get("name", "-"),
+                "project": prj_name,
+                "stage": stg_name,
+                "priority": "High" if str(r.get("priority")) == "1" else "Normal",
+                "date": str(r.get("date_deadline") or "-")[:10],
+            })
+        return rows, columns
+
+    elif entity == "stock_picking":
+        columns = [
+            {"key": "name", "label": "Transfer #", "type": "text"},
+            {"key": "partner", "label": "Partner", "type": "text"},
+            {"key": "type", "label": "Operation Type", "type": "text"},
+            {"key": "origin", "label": "Source Doc", "type": "text"},
+            {"key": "date", "label": "Scheduled Date", "type": "date"},
+            {"key": "state", "label": "Status", "type": "badge"},
+        ]
+        rows = []
+        for r in records:
+            p = r.get("partner_id")
+            p_name = p[1] if isinstance(p, list) and len(p) == 2 else str(p or "-")
+            op = r.get("picking_type_id")
+            op_name = op[1] if isinstance(op, list) and len(op) == 2 else str(op or "-")
+            rows.append({
+                "name": r.get("name", "-"),
+                "partner": p_name,
+                "type": op_name,
+                "origin": str(r.get("origin") or "-"),
+                "date": str(r.get("scheduled_date") or "-")[:10],
+                "state": str(r.get("state") or "draft").replace("_", " ").title(),
+            })
+        return rows, columns
+
     else:
         first = records[0]
         keys = [k for k in first.keys() if k != "id"][:5]
@@ -844,6 +1117,132 @@ def _build_kpi_cards(records: List[Dict], plan: Dict) -> List[Dict]:
                 "change_type": "neutral",
                 "icon": "award",
                 "description": first_email[:25],
+            },
+        ]
+
+    def _fmt(n):
+        if n >= 1_000_000:
+            return f"${n/1_000_000:.2f}M"
+        if n >= 1_000:
+            return f"${n/1_000:.1f}K"
+        return f"${n:,.2f}"
+
+    if plan.get("entity_type") == "purchase_order":
+        po_values = [float(r.get("amount_total", 0) or 0) for r in records]
+        po_sum = sum(po_values)
+        po_top = max(po_values) if po_values else 0
+        po_avg = po_sum / len(po_values) if po_values else 0
+        p_name = records[0].get("partner_id") if records else ""
+        v_name = p_name[1] if isinstance(p_name, list) and len(p_name) == 2 else "Vendor"
+        return [
+            {
+                "title": "Total POs",
+                "value": str(len(records)),
+                "change": None,
+                "change_type": "neutral",
+                "icon": "shopping-cart",
+                "description": "Purchase orders recorded",
+            },
+            {
+                "title": "Procurement Total",
+                "value": _fmt(po_sum),
+                "change": "Volume",
+                "change_type": "up",
+                "icon": "dollar-sign",
+                "description": "Total purchase commitment",
+            },
+            {
+                "title": "Largest PO",
+                "value": _fmt(po_top),
+                "change": "Top #1",
+                "change_type": "up",
+                "icon": "trending-up",
+                "description": f"Vendor: {v_name[:20]}",
+            },
+            {
+                "title": "Average PO",
+                "value": _fmt(po_avg),
+                "change": None,
+                "change_type": "neutral",
+                "icon": "bar-chart-2",
+                "description": "Average commitment per PO",
+            },
+        ]
+
+    elif plan.get("entity_type") == "project":
+        total_tasks = sum(int(r.get("task_count", 0) or 0) for r in records)
+        first_lead = records[0].get("user_id") if records else ""
+        lead_str = first_lead[1] if isinstance(first_lead, list) and len(first_lead) == 2 else "Lead"
+        return [
+            {
+                "title": "Total Projects",
+                "value": str(len(records)),
+                "change": "Active",
+                "change_type": "up",
+                "icon": "briefcase",
+                "description": "Configured projects & sites",
+            },
+            {
+                "title": "Tracked Tasks",
+                "value": str(total_tasks),
+                "change": None,
+                "change_type": "neutral",
+                "icon": "check-square",
+                "description": "Across all active projects",
+            },
+            {
+                "title": "Top Project",
+                "value": (records[0].get("name") or "Project")[:20],
+                "change": "Lead",
+                "change_type": "neutral",
+                "icon": "award",
+                "description": f"Manager: {lead_str[:20]}",
+            },
+            {
+                "title": "Managed Sites",
+                "value": str(len(records)),
+                "change": "100%",
+                "change_type": "up",
+                "icon": "map-pin",
+                "description": "Operational installations",
+            },
+        ]
+
+    elif plan.get("entity_type") == "stock_picking":
+        done_count = sum(1 for r in records if r.get("state") == "done")
+        ready_count = sum(1 for r in records if r.get("state") in ["assigned", "confirmed"])
+        return [
+            {
+                "title": "Total Shipments",
+                "value": str(len(records)),
+                "change": None,
+                "change_type": "neutral",
+                "icon": "truck",
+                "description": "Transfers & pickings",
+            },
+            {
+                "title": "Completed",
+                "value": str(done_count),
+                "change": "Done",
+                "change_type": "up",
+                "icon": "check-circle",
+                "description": "Fully processed transfers",
+            },
+            {
+                "title": "Ready / Pending",
+                "value": str(ready_count),
+                "change": "Action",
+                "change_type": "down" if ready_count > 0 else "neutral",
+                "icon": "clock",
+                "description": "Awaiting warehouse dispatch",
+            },
+            {
+                "title": "Latest Transfer",
+                "value": (records[0].get("name") or "Transfer")[:20],
+                "change": None,
+                "change_type": "neutral",
+                "icon": "package",
+                "description": f"Origin: {records[0].get('origin') or 'Internal'}",
             },
         ]
 
