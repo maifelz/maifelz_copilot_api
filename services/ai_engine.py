@@ -371,6 +371,58 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_count": is_count,
         }
 
+    # Check for specific purchase order line items e.g. "what is the items in purchase order P01061"
+    po_ref_match = re.search(r"\b(p0\d+|p\d{3,})\b", p)
+    is_asking_lines = any(w in p for w in ["item", "items", "product", "products", "line", "lines", "part", "parts", "component", "components", "what is in", "what are in", "contain", "contains"])
+
+    if po_ref_match or (is_asking_lines and any(w in p for w in ["purchase", "po", "procurement", "vendor order", "supplier order"])):
+        po_ref = po_ref_match.group(1).upper() if po_ref_match else None
+        domain = [["order_id.name", "ilike", po_ref]] if po_ref else []
+        title = f"Items in Purchase Order {po_ref}" if po_ref else "Purchase Order Line Items"
+        return {
+            "entity_type": "purchase_order_line",
+            "report_title": title,
+            "model": "purchase.order.line",
+            "domain": domain,
+            "po_ref": po_ref,
+            "fields": ["name", "product_id", "product_qty", "price_unit", "price_subtotal", "order_id"],
+            "order": "id asc",
+            "limit": 50,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["price_subtotal"],
+            "date_field": "",
+            "value_field": "price_subtotal",
+            "is_today": False,
+            "is_recent": is_recent,
+            "is_count": is_count,
+        }
+
+    # Check for specific sales order line items e.g. "what is the items in sales order S00049"
+    so_ref_match = re.search(r"\b(s0\d+|so\d+|s\d{4,})\b", p)
+    if so_ref_match or (is_asking_lines and any(w in p for w in ["sale", "so", "quote", "quotation", "sales order"])):
+        so_ref = so_ref_match.group(1).upper() if so_ref_match else None
+        domain = [["order_id.name", "ilike", so_ref]] if so_ref else []
+        title = f"Items in Sales Order {so_ref}" if so_ref else "Sales Order Line Items"
+        return {
+            "entity_type": "sale_order_line",
+            "report_title": title,
+            "model": "sale.order.line",
+            "domain": domain,
+            "so_ref": so_ref,
+            "fields": ["name", "product_id", "product_uom_qty", "price_unit", "price_subtotal", "order_id"],
+            "order": "id asc",
+            "limit": 50,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["price_subtotal"],
+            "date_field": "",
+            "value_field": "price_subtotal",
+            "is_today": False,
+            "is_recent": is_recent,
+            "is_count": is_count,
+        }
+
     elif any(w in p for w in ["purchase", "po", "procurement", "vendor order", "supplier order", "buying"]):
         domain = []
         if "draft" in p:
@@ -511,14 +563,14 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "value_field": "total_invoiced",
         }
 
-    elif any(w in p for w in ["product", "stock", "inventory", "item"]):
+    elif any(w in p for w in ["product", "products", "stock", "inventory", "catalog", "goods", "sku", "item"]):
         return {
             "entity_type": "product",
             "report_title": "Product & Inventory Overview",
             "model": "product.product",
-            "domain": [["type", "=", "product"]],
+            "domain": [["type", "in", ["consu", "product"]]],
             "fields": ["name", "qty_available", "list_price", "standard_price", "default_code"],
-            "order": f"qty_available {order_dir}",
+            "order": f"list_price {order_dir}",
             "limit": 20,
             "chart_type": "bar",
             "x_key": "name",
@@ -552,7 +604,32 @@ def _execute_plan(connector: OdooConnector, plan: Dict, prompt: str, today: date
     order = plan.get("order", "create_date desc")
     limit = min(int(plan.get("limit", 25)), 100)
 
-    records = connector.search_read(model, domain, fields, limit=limit, order=order)
+    # Resolution for PO line items when no specific PO was supplied
+    if plan.get("entity_type") == "purchase_order_line" and not domain:
+        latest_po = connector.search_read("purchase.order", [], ["id", "name"], limit=1, order="date_order desc")
+        if latest_po:
+            domain = [["order_id", "=", latest_po[0]["id"]]]
+            plan["report_title"] = f"Items in Purchase Order {latest_po[0].get('name')}"
+
+    # Resolution for SO line items when no specific SO was supplied
+    if plan.get("entity_type") == "sale_order_line" and not domain:
+        latest_so = connector.search_read("sale.order", [], ["id", "name"], limit=1, order="date_order desc")
+        if latest_so:
+            domain = [["order_id", "=", latest_so[0]["id"]]]
+            plan["report_title"] = f"Items in Sales Order {latest_so[0].get('name')}"
+
+    # Guard against non-stored fields in SQL order clause (like qty_available)
+    if order and "qty_available" in order:
+        order = "id desc"
+
+    try:
+        records = connector.search_read(model, domain, fields, limit=limit, order=order)
+    except Exception as e:
+        err_str = str(e)
+        if "to SQL because it is not stored" in err_str or "ValueError" in err_str or "order" in err_str:
+            records = connector.search_read(model, domain, fields, limit=limit, order="id desc")
+        else:
+            raise e
 
     # Special handling for "today" filter:
     if plan.get("is_today"):
@@ -703,6 +780,59 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
         recommendations = [
             f"Prioritize collection verification for {name_1} ({amount_1}) to optimize cash flow.",
             "Establish automated payment reminders for invoices over $10,000.",
+        ]
+
+    elif entity == "purchase_order_line":
+        total_items = len(records)
+        total_qty = sum(float(r.get("product_qty", 0) or 0) for r in records)
+        po_order = records[0].get("order_id") if records else None
+        po_title = po_order[1] if isinstance(po_order, list) and len(po_order) == 2 else str(po_order or "Purchase Order")
+        po_ref_clean = po_title.split(" ")[0] if po_title else "PO"
+
+        item_highlights = [f"{r.get('name', 'Item')} (Qty: {r.get('product_qty')})" for r in records[:3]]
+        highlights_str = ", ".join(item_highlights)
+
+        direct_answer = (
+            f"Purchase order **{po_ref_clean}** contains **{total_items} item{'s' if total_items != 1 else ''}** "
+            f"(totaling {total_qty:g} units) with a combined subtotal of **{_cur(total_val)}**. "
+            f"Key items include: **{highlights_str}**."
+        )
+        executive_summary = (
+            f"Detailed product line-item breakdown for {po_ref_clean}. "
+            f"Consists of {total_items} distinct lines with a total order subtotal of {_cur(total_val)}."
+        )
+        insights = [
+            f"Largest item by line value: {top_record.get('name')} ({_cur(top_record.get('price_subtotal', 0))})",
+            f"Total distinct product lines: {total_items}",
+            f"Total units ordered: {total_qty:g}",
+        ]
+        recommendations = [
+            "Verify delivered quantities upon warehouse receipt against the supplier packing slip.",
+            "Cross-reference unit prices against agreed master pricing agreement.",
+        ]
+
+    elif entity == "sale_order_line":
+        total_items = len(records)
+        total_qty = sum(float(r.get("product_uom_qty", 0) or 0) for r in records)
+        so_order = records[0].get("order_id") if records else None
+        so_title = so_order[1] if isinstance(so_order, list) and len(so_order) == 2 else str(so_order or "Sales Order")
+        so_ref_clean = so_title.split(" ")[0] if so_title else "SO"
+
+        item_highlights = [f"{r.get('name', 'Item')} (Qty: {r.get('product_uom_qty')})" for r in records[:3]]
+        highlights_str = ", ".join(item_highlights)
+
+        direct_answer = (
+            f"Sales order **{so_ref_clean}** contains **{total_items} item{'s' if total_items != 1 else ''}** "
+            f"(totaling {total_qty:g} units) with a combined value of **{_cur(total_val)}**. "
+            f"Key items: **{highlights_str}**."
+        )
+        executive_summary = f"Line-item breakdown for sales order {so_ref_clean} representing {_cur(total_val)}."
+        insights = [
+            f"Highest value line: {top_record.get('name')} ({_cur(top_record.get('price_subtotal', 0))})",
+            f"Total order lines: {total_items}",
+        ]
+        recommendations = [
+            "Ensure stock availability for all order items before scheduling installation.",
         ]
 
     elif entity == "purchase_order":
@@ -964,6 +1094,42 @@ def _build_table_data(records: List[Dict], plan: Dict) -> tuple:
             })
         return rows, columns
 
+    elif entity == "purchase_order_line":
+        columns = [
+            {"key": "name", "label": "Product / Description", "type": "text"},
+            {"key": "qty", "label": "Quantity", "type": "number"},
+            {"key": "price_unit", "label": "Unit Price", "type": "currency"},
+            {"key": "subtotal", "label": "Line Subtotal", "type": "currency"},
+        ]
+        rows = []
+        for r in records:
+            p_name = r.get("name") or "-"
+            rows.append({
+                "name": p_name,
+                "qty": float(r.get("product_qty", 0) or 0),
+                "price_unit": float(r.get("price_unit", 0) or 0),
+                "subtotal": float(r.get("price_subtotal", 0) or 0),
+            })
+        return rows, columns
+
+    elif entity == "sale_order_line":
+        columns = [
+            {"key": "name", "label": "Product / Description", "type": "text"},
+            {"key": "qty", "label": "Quantity", "type": "number"},
+            {"key": "price_unit", "label": "Unit Price", "type": "currency"},
+            {"key": "subtotal", "label": "Line Subtotal", "type": "currency"},
+        ]
+        rows = []
+        for r in records:
+            p_name = r.get("name") or "-"
+            rows.append({
+                "name": p_name,
+                "qty": float(r.get("product_uom_qty", 0) or 0),
+                "price_unit": float(r.get("price_unit", 0) or 0),
+                "subtotal": float(r.get("price_subtotal", 0) or 0),
+            })
+        return rows, columns
+
     elif entity == "purchase_order":
         columns = [
             {"key": "name", "label": "PO #", "type": "text"},
@@ -1127,7 +1293,47 @@ def _build_kpi_cards(records: List[Dict], plan: Dict) -> List[Dict]:
             return f"${n/1_000:.1f}K"
         return f"${n:,.2f}"
 
-    if plan.get("entity_type") == "purchase_order":
+    if plan.get("entity_type") in ["purchase_order_line", "sale_order_line"]:
+        qty_key = "product_qty" if plan.get("entity_type") == "purchase_order_line" else "product_uom_qty"
+        total_qty = sum(float(r.get(qty_key, 0) or 0) for r in records)
+        top_line = max(records, key=lambda x: float(x.get("price_subtotal", 0) or 0)) if records else {}
+        total_subtotal = sum(float(r.get("price_subtotal", 0) or 0) for r in records)
+        return [
+            {
+                "title": "Line Items",
+                "value": str(len(records)),
+                "change": "Products",
+                "change_type": "neutral",
+                "icon": "package",
+                "description": "Distinct products on order",
+            },
+            {
+                "title": "Total Units",
+                "value": f"{total_qty:g}",
+                "change": "Ordered",
+                "change_type": "up",
+                "icon": "hash",
+                "description": "Combined item quantities",
+            },
+            {
+                "title": "Line Subtotal",
+                "value": _fmt(total_subtotal),
+                "change": "Total",
+                "change_type": "up",
+                "icon": "dollar-sign",
+                "description": "Excluding freight & tax",
+            },
+            {
+                "title": "Top Value Item",
+                "value": _fmt(float(top_line.get("price_subtotal", 0) or 0)),
+                "change": "Highest",
+                "change_type": "up",
+                "icon": "award",
+                "description": str(top_line.get("name") or "Item")[:22],
+            },
+        ]
+
+    elif plan.get("entity_type") == "purchase_order":
         po_values = [float(r.get("amount_total", 0) or 0) for r in records]
         po_sum = sum(po_values)
         po_top = max(po_values) if po_values else 0
