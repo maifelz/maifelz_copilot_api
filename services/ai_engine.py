@@ -171,6 +171,9 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
     # Build KPI cards
     kpi_cards = _build_kpi_cards(raw_data, query_plan)
 
+    # Interactive Chatter: Clarification question & smart follow-up suggestions
+    clarification_q, follow_ups = _build_chatter_clarifications(prompt, raw_data, query_plan)
+
     return {
         "success": error_message is None,
         "prompt": prompt,
@@ -193,6 +196,8 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
         "table_records": table_records[:50],
         "insights": synthesis.get("insights", []),
         "recommendations": synthesis.get("recommendations", []),
+        "clarification_question": clarification_q,
+        "follow_up_suggestions": follow_ups,
         "raw_data_available": len(raw_data) > 0,
         "error": error_message,
     }
@@ -972,6 +977,129 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
         "insights": insights,
         "recommendations": recommendations,
     }
+
+
+def _build_chatter_clarifications(prompt: str, raw_data: List[Dict], plan: Dict) -> Tuple[Optional[str], List[str]]:
+    """Generates intelligent interactive clarification questions and next-action prompt chips."""
+    entity = plan.get("entity_type", "")
+    top = raw_data[0] if raw_data else {}
+
+    # Helper for partner name
+    partner = top.get("partner_id") or top.get("partner_name")
+    p_name = partner[1] if isinstance(partner, list) and len(partner) == 2 else str(partner or "")
+
+    # 1. Purchase Orders
+    if entity == "purchase_order":
+        po_name = top.get("name", "PO")
+        clarification = f"Would you like to drill down into the line items for purchase order **{po_name}**, or filter by supplier?"
+        suggestions = [
+            f"What are the items in purchase order {po_name}?",
+            f"Show purchase orders from {p_name}" if p_name else "Show purchase orders this month",
+            "Show only draft purchase orders",
+            "What is our largest purchase order?",
+        ]
+        return clarification, [s for s in suggestions if s]
+
+    # 2. Purchase Order Line Items
+    elif entity == "purchase_order_line":
+        po_title = plan.get("po_ref") or "this purchase order"
+        clarification = f"Would you like to check the shipment status or view related purchase orders?"
+        suggestions = [
+            "Show all purchase orders",
+            "Status of shipments",
+            "Show items in latest sales order",
+            "Product & inventory overview",
+        ]
+        return clarification, suggestions
+
+    # 3. Sales Orders
+    elif entity == "sale_order":
+        so_name = top.get("name", "SO")
+        clarification = f"Would you like to see the products ordered in **{so_name}**, or analyze customer revenue?"
+        suggestions = [
+            f"What are the items in sales order {so_name}?",
+            "Top 10 customers by revenue",
+            "Show sales orders confirmed this month",
+            "Show sales pipeline and opportunities",
+        ]
+        return clarification, suggestions
+
+    # 4. Sales Order Line Items
+    elif entity == "sale_order_line":
+        clarification = "Would you like to check customer invoice status or see active solar projects?"
+        suggestions = [
+            "Top sales orders",
+            "Show all invoices",
+            "Show active projects",
+            "Top 10 customers by revenue",
+        ]
+        return clarification, suggestions
+
+    # 5. Invoices
+    elif entity == "invoice":
+        clarification = "Would you like to filter by overdue unpaid balances, or view invoices from a specific client?"
+        suggestions = [
+            "Show overdue unpaid invoices",
+            f"Show invoices for {p_name}" if p_name else "Invoices paid this month",
+            "What is our last invoice number?",
+            "Show top customers by revenue",
+        ]
+        return clarification, [s for s in suggestions if s]
+
+    # 6. CRM & Pipeline
+    elif entity == "lead":
+        clarification = "Would you like to see deals by sales stage, or check opportunities created this week?"
+        suggestions = [
+            "Show leads in qualified stage",
+            "How many leads generated today?",
+            "Top 5 pipeline opportunities by expected revenue",
+            "Show confirmed sales orders",
+        ]
+        return clarification, suggestions
+
+    # 7. Projects & Tasks
+    elif entity == "project":
+        proj_name = (top.get("name") or "Project")[:25]
+        clarification = f"Would you like to view active tasks for **{proj_name}**, or check assigned leads?"
+        suggestions = [
+            "Show project tasks and deadlines",
+            "Show projects for client CLEARWORLD",
+            "Status of shipments",
+            "Show all configured users in Odoo",
+        ]
+        return clarification, suggestions
+
+    # 8. Users & Logins
+    elif entity == "user":
+        clarification = "Would you like to check user access permissions, or view staff by department?"
+        suggestions = [
+            "Who logged in today?",
+            "Show employee directory",
+            "Show all active projects",
+            "Who is the primary administrator?",
+        ]
+        return clarification, suggestions
+
+    # 9. Stock & Logistics
+    elif entity in ["stock_picking", "product"]:
+        clarification = "Would you like to inspect pending warehouse dispatches or review item stock levels?"
+        suggestions = [
+            "Show pending warehouse delivery orders",
+            "Product & inventory overview",
+            "Show recent incoming supplier receipts",
+            "Show purchase order details",
+        ]
+        return clarification, suggestions
+
+    # Default / General
+    clarification = "Would you like to explore deeper into any specific customer, date range, or transaction?"
+    suggestions = [
+        "Show purchase order details",
+        "Show CRM sales pipeline",
+        "What is our last invoice number?",
+        "Show all active projects",
+    ]
+    return clarification, suggestions
 
 
 def _build_chart_data(records: List[Dict], plan: Dict) -> List[Dict]:
