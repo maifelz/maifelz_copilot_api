@@ -22,8 +22,25 @@ try:
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
-
 from services.odoo_connector import OdooConnector
+from services.mcp_tools import (
+    get_smart_default_fields,
+    score_field_importance,
+    is_sensitive_field_name,
+    RecordFormatter,
+    DatasetFormatter,
+)
+
+_model_schema_cache: Dict[str, Dict[str, Any]] = {}
+
+def get_cached_model_fields(connector: OdooConnector, model: str) -> Dict[str, Any]:
+    """Caches model fields_get to eliminate redundant XML-RPC introspection calls."""
+    if model not in _model_schema_cache:
+        try:
+            _model_schema_cache[model] = connector.get_model_fields(model)
+        except Exception:
+            _model_schema_cache[model] = {}
+    return _model_schema_cache[model]
 
 
 def get_llm_client() -> Tuple[Optional[str], Any]:
@@ -142,16 +159,303 @@ Provide your response in valid JSON (no markdown):
 """
 
 
+def _detect_multi_topics(prompt: str) -> List[str]:
+    """Detects if multiple business domains are requested in a single prompt."""
+    p = prompt.lower()
+    topics = []
+    if any(w in p for w in ["purchase order", "purchase", "procurement", "po details", "vendor order", "supplier order", "പർച്ചേ", "പർച്ചെയ്"]):
+        topics.append("purchase.order")
+    if any(w in p for w in ["crm", "lead", "leads", "opportunity", "opportunities", "pipeline", "സി.ആർ", "സിആർ", "ലീഡ്"]):
+        topics.append("crm.lead")
+    if any(w in p for w in ["project", "projects", "installation", "installations", "task", "tasks", "പ്രൊജ", "പ്രോജ"]):
+        topics.append("project.project")
+    if (any(w in p for w in ["sale order", "sales order", "quotation", "quotes", "സെയിൽ", "വിൽപന"]) or ("sales" in p and "purchase" not in p)):
+        topics.append("sale.order")
+    if any(w in p for w in ["invoice", "invoices", "bill", "bills", "ഇൻവോയ്", "ബിൽ"]):
+        topics.append("account.move")
+    if any(w in p for w in ["user", "users", "login", "logins", "staff", "യൂസർ", "ഉപയോക്താ"]):
+        topics.append("res.users")
+
+    if any(w in p for w in ["all reports", "all report", "full report", "complete report", "എല്ലാ റിപ്പോർട്ട്", "എല്ലാ ഡീറ്റെയിൽ", "മുഴുവൻ റിപ്പോർട്ട്"]) and len(topics) < 2:
+        return ["purchase.order", "crm.lead", "project.project"]
+
+    return list(dict.fromkeys(topics))
+
+
+async def _execute_multi_topic_report(
+    connector: OdooConnector,
+    topics: List[str],
+    prompt: str,
+    today: datetime,
+    client_type: Optional[str],
+    client: Any,
+    engine_name: str
+) -> Dict[str, Any]:
+    today_str = today.strftime("%Y-%m-%d")
+    is_ml = any('\u0D00' <= c <= '\u0D7F' for c in prompt)
+
+    sections = []
+    kpi_cards = []
+    all_table_records = []
+    formatted_summaries = []
+
+    # 1. Purchase Orders
+    if "purchase.order" in topics:
+        po_groups = []
+        try:
+            po_groups = connector.read_group("purchase.order", [], ["amount_total:sum"], ["state"])
+        except Exception:
+            pass
+        po_total_cnt = sum(g.get("__count", 0) for g in po_groups)
+        po_confirmed_amt = sum(g.get("amount_total", 0) for g in po_groups if g.get("state") == "purchase")
+        po_recs = connector.search_read(
+            "purchase.order", [], ["name", "partner_id", "amount_total", "date_order", "state"],
+            limit=10, order="date_order desc, id desc"
+        )
+
+        po_chart_data = []
+        for g in po_groups:
+            st = g.get("state", "unknown")
+            label = "Confirmed PO" if st == "purchase" else ("Draft RFQ" if st == "draft" else st.capitalize())
+            po_chart_data.append({"label": label, "value": g.get("amount_total", 0), "count": g.get("__count", 0)})
+
+        sections.append({
+            "title": "Purchase Orders & Procurement" if not is_ml else "പർച്ചേസ് ഓർഡറുകൾ",
+            "chart_type": "bar",
+            "data": po_chart_data,
+            "x_key": "label",
+            "y_keys": ["value"],
+            "summary": f"Total {po_total_cnt} purchase orders (${po_confirmed_amt:,.2f} confirmed spend)",
+            "color_scheme": "maifelz",
+        })
+
+        kpi_cards.append({
+            "title": "Purchase Spend" if not is_ml else "പർച്ചേസ് തുക",
+            "value": f"${po_confirmed_amt/1000:.1f}K" if po_confirmed_amt >= 1000 else f"${po_confirmed_amt:,.2f}",
+            "change": f"{po_total_cnt} POs",
+            "change_type": "up",
+            "icon": "shopping-cart",
+            "description": "Confirmed procurement orders",
+        })
+
+        for r in po_recs:
+            p_name = r.get("partner_id", [0, "Unknown"])[1] if isinstance(r.get("partner_id"), (list, tuple)) else str(r.get("partner_id") or "Unknown")
+            all_table_records.append({
+                "type": "PO",
+                "name": r.get("name", ""),
+                "partner": p_name,
+                "amount": r.get("amount_total", 0),
+                "date": str(r.get("date_order", ""))[:10],
+                "state": str(r.get("state", "")).capitalize(),
+            })
+
+        st_strs = [f"{g.get('state')}: {g.get('__count')} orders (${g.get('amount_total', 0):,.2f})" for g in po_groups]
+        formatted_summaries.append(f"PURCHASE ORDERS: Total {po_total_cnt} POs (${po_confirmed_amt:,.2f} confirmed spend). Status breakdown: {', '.join(st_strs)}.")
+
+    # 2. CRM Pipeline
+    if "crm.lead" in topics:
+        crm_groups = []
+        try:
+            crm_groups = connector.read_group("crm.lead", [], ["expected_revenue:sum"], ["stage_id"])
+        except Exception:
+            pass
+        crm_total_cnt = sum(g.get("__count", 0) for g in crm_groups)
+        crm_total_rev = sum(g.get("expected_revenue", 0) for g in crm_groups)
+        crm_recs = connector.search_read(
+            "crm.lead", [], ["name", "partner_id", "expected_revenue", "stage_id", "create_date"],
+            limit=10, order="expected_revenue desc, id desc"
+        )
+
+        crm_chart_data = []
+        for g in crm_groups:
+            st_raw = g.get("stage_id")
+            st_name = st_raw[1] if isinstance(st_raw, (list, tuple)) else str(st_raw or "Stage")
+            crm_chart_data.append({"label": st_name, "value": g.get("expected_revenue", 0), "count": g.get("__count", 0)})
+
+        sections.append({
+            "title": "CRM Sales Pipeline" if not is_ml else "സി.ആർ.എം പൈപ്പ്‌ലൈൻ",
+            "chart_type": "bar",
+            "data": crm_chart_data,
+            "x_key": "label",
+            "y_keys": ["value"],
+            "summary": f"Total {crm_total_cnt} opportunities (${crm_total_rev:,.2f} pipeline value)",
+            "color_scheme": "emerald",
+        })
+
+        kpi_cards.append({
+            "title": "CRM Pipeline" if not is_ml else "സി.ആർ.എം പൈപ്പ്‌ലൈൻ",
+            "value": f"${crm_total_rev/1_000_000:.2f}M" if crm_total_rev >= 1_000_000 else f"${crm_total_rev/1000:.1f}K",
+            "change": f"{crm_total_cnt} Leads",
+            "change_type": "up",
+            "icon": "target",
+            "description": "Total expected revenue pipeline",
+        })
+
+        for r in crm_recs:
+            p_name = r.get("partner_id", [0, ""])
+            p_str = p_name[1] if isinstance(p_name, (list, tuple)) else str(p_name or "")
+            st_raw = r.get("stage_id")
+            st_str = st_raw[1] if isinstance(st_raw, (list, tuple)) else str(st_raw or "")
+            all_table_records.append({
+                "type": "CRM",
+                "name": r.get("name", ""),
+                "partner": p_str or "Lead",
+                "amount": r.get("expected_revenue", 0),
+                "date": str(r.get("create_date", ""))[:10],
+                "state": st_str or "Active",
+            })
+
+        stage_strs = []
+        for g in crm_groups:
+            s_name = g.get("stage_id", [0, "Unknown"])[1] if isinstance(g.get("stage_id"), (list, tuple)) else str(g.get("stage_id"))
+            stage_strs.append(f"{s_name}: {g.get('__count')} leads (${g.get('expected_revenue', 0):,.2f})")
+        formatted_summaries.append(f"CRM SALES PIPELINE: Total {crm_total_cnt} opportunities (${crm_total_rev:,.2f} pipeline). Stages breakdown: {', '.join(stage_strs)}.")
+
+    # 3. Projects & Operations
+    if "project.project" in topics:
+        proj_all = connector.search_read("project.project", [], ["id"], limit=500)
+        proj_recs = connector.search_read(
+            "project.project", [], ["name", "partner_id", "user_id", "task_count"],
+            limit=10, order="id desc"
+        )
+        proj_cnt = len(proj_all)
+
+        proj_chart_data = [{"label": p.get("name", "")[:20], "value": p.get("task_count", 0)} for p in proj_recs[:7]]
+        sections.append({
+            "title": "Project Operations & Status" if not is_ml else "പ്രൊജക്റ്റുകൾ & സ്റ്റാറ്റസ്",
+            "chart_type": "bar",
+            "data": proj_chart_data,
+            "x_key": "label",
+            "y_keys": ["value"],
+            "summary": f"{proj_cnt} active installation projects in progress",
+            "color_scheme": "indigo",
+        })
+
+        kpi_cards.append({
+            "title": "Active Projects" if not is_ml else "ആക്റ്റീവ് പ്രൊജക്റ്റുകൾ",
+            "value": str(proj_cnt),
+            "change": "Active",
+            "change_type": "neutral",
+            "icon": "briefcase",
+            "description": "Solar & installation projects",
+        })
+
+        for r in proj_recs:
+            p_name = r.get("partner_id", [0, ""])[1] if isinstance(r.get("partner_id"), (list, tuple)) else str(r.get("partner_id") or "")
+            u_name = r.get("user_id", [0, ""])[1] if isinstance(r.get("user_id"), (list, tuple)) else str(r.get("user_id") or "")
+            all_table_records.append({
+                "type": "Project",
+                "name": r.get("name", ""),
+                "partner": p_name or u_name,
+                "amount": r.get("task_count", 0),
+                "date": "Active",
+                "state": "In Progress",
+            })
+
+        p_names = [p.get("name", "") for p in proj_recs[:3]]
+        formatted_summaries.append(f"PROJECTS: {proj_cnt} active projects. Key installations: {', '.join(p_names)}.")
+
+    # 4. System Users / Logins
+    users = connector.search_read("res.users", [["share", "=", False]], ["name", "login"], limit=20)
+    if users:
+        kpi_cards.append({
+            "title": "Internal Users" if not is_ml else "യൂസേഴ്സ്",
+            "value": str(len(users)),
+            "change": "Active",
+            "change_type": "up",
+            "icon": "users",
+            "description": "Configured employee logins",
+        })
+
+    table_columns = [
+        {"key": "type", "label": "Module", "type": "badge"},
+        {"key": "name", "label": "Title / Reference", "type": "text"},
+        {"key": "partner", "label": "Customer / Vendor", "type": "text"},
+        {"key": "amount", "label": "Amount / Value", "type": "currency"},
+        {"key": "date", "label": "Date / Timeline", "type": "date"},
+        {"key": "state", "label": "Status / Stage", "type": "badge"},
+    ]
+
+    combined_summary_text = "\n\n".join(formatted_summaries)
+
+    synthesis = None
+    if client:
+        try:
+            synthesis = await _llm_synthesize(
+                client_type,
+                client,
+                prompt,
+                all_table_records[:15],
+                today_str,
+                model_name="Executive Multi-Department Overview",
+                aggregations_summary=combined_summary_text
+            )
+        except Exception:
+            pass
+
+    if not synthesis:
+        if is_ml:
+            direct_ans = f"നിങ്ങളുടെ ബിസിനസ്സിന്റെ പൂർണ്ണ റിപ്പോർട്ട്: പർച്ചേസ് ഓർഡറുകൾ ({len(all_table_records)} റെക്കോർഡുകൾ), സി.ആർ.എം പൈപ്പ്‌ലൈൻ, പ്രൊജക്റ്റ് സ്റ്റാറ്റസ് എന്നിവ താഴെ നൽകിയിരിക്കുന്നു."
+        else:
+            direct_ans = f"Here is your complete business overview covering Purchase Orders, CRM Pipeline, and Projects."
+        synthesis = {
+            "direct_answer": direct_ans,
+            "executive_summary": "Comprehensive multi-department operational review.",
+            "insights": [f"Multi-department summary covering {len(topics)} operational modules."],
+            "recommendations": ["Review open quotations and pending purchase approvals."],
+            "clarification_question": "Would you like to drill down into any specific department (Purchase, CRM, or Projects)?" if not is_ml else "ഇതിൽ ഏതെങ്കിലും ഒരു പ്രത്യേക വിഭാഗത്തെക്കുറിച്ച് കൂടുതൽ അറിയണോ?",
+            "follow_up_suggestions": [
+                "Detailed purchase orders status",
+                "Show CRM leads by stage",
+                "Show all projects and tasks"
+            ] if not is_ml else [
+                "പർച്ചേസ് ഓർഡറുകളുടെ വിശദാംശങ്ങൾ",
+                "സി.ആർ.എം ലീഡുകൾ സ്റ്റേജ് തിരിച്ച്",
+                "എല്ലാ പ്രൊജക്റ്റുകളും ടാസ്കുകളും"
+            ]
+        }
+
+    return {
+        "success": True,
+        "prompt": prompt,
+        "report_title": "Executive Business Overview: Procurement, CRM & Projects" if not is_ml else "ബിസിനസ്സ് പൂർണ്ണ റിപ്പോർട്ട് (പർച്ചേസ്, സി.ആർ.എം, പ്രൊജക്റ്റുകൾ)",
+        "direct_answer": synthesis.get("direct_answer"),
+        "executive_summary": synthesis.get("executive_summary", ""),
+        "kpi_cards": kpi_cards[:4],
+        "sections": sections,
+        "table_columns": table_columns,
+        "table_records": all_table_records[:50],
+        "insights": synthesis.get("insights", []),
+        "recommendations": synthesis.get("recommendations", []),
+        "clarification_question": synthesis.get("clarification_question"),
+        "follow_up_suggestions": synthesis.get("follow_up_suggestions"),
+        "language": "ml" if is_ml else "en",
+        "engine": engine_name,
+        "raw_data_available": True,
+        "error": None,
+    }
+
+
 async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any]:
     """
     Main AI pipeline:
     1. Parse user intent (via LLM or Smart BI NLP).
-    2. Execute exact Odoo search_read queries.
-    3. Synthesize a Direct Conversational Answer + KPIs + Chart + Table.
+    2. Check for multi-topic requests (e.g. Purchase Orders + CRM + Projects).
+    3. Execute exact Odoo search_read & read_group queries with MCP schema validation.
+    4. Synthesize a Direct Conversational Answer + KPIs + Chart + Table.
     """
     today = datetime.now()
     today_str = today.strftime("%Y-%m-%d")
     client_type, client = get_llm_client()
+
+    engine_name = "Google Gemini 2.0 Flash" if client_type == "gemini" else ("OpenAI GPT-4o" if client_type == "openai" else "Smart ERP Intelligence")
+
+    # 1. Check for Multi-Topic / Multi-Department requests (e.g. Purchase Orders + CRM + Projects)
+    multi_topics = _detect_multi_topics(prompt)
+    if len(multi_topics) >= 2:
+        return await _execute_multi_topic_report(
+            connector, multi_topics, prompt, today, client_type, client, engine_name
+        )
 
     query_plan = None
     engine_name = "Google Gemini 2.0 Flash" if client_type == "gemini" else ("OpenAI GPT-4o" if client_type == "openai" else "Smart ERP Intelligence")
@@ -183,7 +487,15 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
     synthesis = None
     if client and raw_data:
         try:
-            synthesis = await _llm_synthesize(client_type, client, prompt, raw_data[:25], today_str)
+            synthesis = await _llm_synthesize(
+                client_type,
+                client,
+                prompt,
+                raw_data[:25],
+                today_str,
+                model_name=query_plan.get("model", "record"),
+                model_fields=query_plan.get("_fields_meta")
+            )
         except Exception:
             pass
 
@@ -292,11 +604,38 @@ async def _llm_classify(c_type: str, client: Any, prompt: str, today_str: str) -
     return json.loads(text)
 
 
-async def _llm_synthesize(c_type: str, client: Any, prompt: str, sample_records: List[Dict], today_str: str) -> Dict:
+async def _llm_synthesize(
+    c_type: str,
+    client: Any,
+    prompt: str,
+    sample_records: List[Dict],
+    today_str: str,
+    model_name: str = "record",
+    model_fields: Optional[Dict] = None,
+    aggregations_summary: str = ""
+) -> Dict:
+    # Use MCP RecordFormatter to turn raw records into clean, unambiguous representation
+    formatted_recs = ""
+    if sample_records:
+        try:
+            formatter = RecordFormatter(model_name)
+            formatted_recs = "\n".join(
+                formatter.format_record(r, model_fields) for r in sample_records[:20]
+            )
+        except Exception:
+            formatted_recs = json.dumps(sample_records[:20], default=str)
+    else:
+        formatted_recs = "No individual records found matching criteria."
+
+    combined_data_text = ""
+    if aggregations_summary:
+        combined_data_text += f"=== SERVER-CALCULATED AGGREGATES & STATUS BREAKDOWN ===\n{aggregations_summary}\n\n"
+    combined_data_text += f"=== DETAILED RECORDS ({model_name}) ===\n{formatted_recs}"
+
     prompt_synth = GEMINI_SYNTHESIS_PROMPT.format(
         today=today_str,
         query=prompt,
-        records=json.dumps(sample_records, default=str)[:3500],
+        records=combined_data_text[:5000],
         total_count=len(sample_records),
     )
     text = ""
@@ -705,12 +1044,39 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
 
 
 def _execute_plan(connector: OdooConnector, plan: Dict, prompt: str, today: datetime) -> List[Dict]:
-    """Executes search_read with graceful fallback if a strict date filter yields 0 records."""
+    """Executes search_read with schema validation, smart fields, and fallback safeguards."""
     model = plan.get("model", "account.move")
     domain = plan.get("domain", [])
-    fields = plan.get("fields", ["name", "amount_total"])
+    requested_fields = plan.get("fields", [])
     order = plan.get("order", "create_date desc")
     limit = min(int(plan.get("limit", 25)), 100)
+
+    # 1. Introspect Schema via MCP Cache
+    fields_meta = get_cached_model_fields(connector, model)
+    plan["_fields_meta"] = fields_meta
+
+    # 2. Smart Field Selection
+    if fields_meta:
+        valid_fields = [f for f in requested_fields if f in fields_meta]
+        if not valid_fields:
+            valid_fields = get_smart_default_fields(fields_meta, max_fields=15)
+        for crit in ["name", "display_name", "date_order", "invoice_date", "create_date", "partner_id", "amount_total", "state", "stage_id", "user_id"]:
+            if crit in fields_meta and crit not in valid_fields and len(valid_fields) < 18:
+                valid_fields.append(crit)
+        fields = valid_fields
+    else:
+        fields = requested_fields or ["name", "id"]
+
+    # 3. Clean Domain of invalid field names to prevent XML-RPC Faults
+    if fields_meta and domain:
+        cleaned_domain = []
+        for cond in domain:
+            if isinstance(cond, (list, tuple)) and len(cond) == 3:
+                fname = cond[0]
+                if "." not in fname and fname not in fields_meta:
+                    continue
+            cleaned_domain.append(cond)
+        domain = cleaned_domain
 
     # Resolution for PO line items when no specific PO was supplied
     if plan.get("entity_type") == "purchase_order_line" and not domain:
@@ -726,9 +1092,13 @@ def _execute_plan(connector: OdooConnector, plan: Dict, prompt: str, today: date
             domain = [["order_id", "=", latest_so[0]["id"]]]
             plan["report_title"] = f"Items in Sales Order {latest_so[0].get('name')}"
 
-    # Guard against non-stored fields in SQL order clause (like qty_available)
+    # Guard against non-stored fields in SQL order clause
     if order and "qty_available" in order:
         order = "id desc"
+    if fields_meta and order:
+        first_order_field = order.split()[0].replace(",", "")
+        if first_order_field in fields_meta and not fields_meta[first_order_field].get("store", True):
+            order = "id desc"
 
     # Ensure date descending order for recent/last/latest queries in English or Malayalam
     p_lower = prompt.lower()
@@ -750,6 +1120,9 @@ def _execute_plan(connector: OdooConnector, plan: Dict, prompt: str, today: date
         err_str = str(e)
         if "to SQL because it is not stored" in err_str or "ValueError" in err_str or "order" in err_str:
             records = connector.search_read(model, domain, fields, limit=limit, order="id desc")
+        elif "does not exist" in err_str or "KeyError" in err_str or "tuple index" in err_str:
+            minimal_fields = [f for f in ["name", "display_name", "id", "state"] if not fields_meta or f in fields_meta]
+            records = connector.search_read(model, [], minimal_fields, limit=limit, order="id desc")
         else:
             raise e
 
