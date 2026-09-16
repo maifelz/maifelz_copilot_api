@@ -15,7 +15,8 @@ router = APIRouter(prefix="/reports", tags=["Report Export"])
 async def export_html(request: ExportRequest):
     """Export report as branded HTML (for preview and PDF generation)."""
     try:
-        html = generate_html_report(request.report_data.dict(), request.branding)
+        data = request.report_data if isinstance(request.report_data, dict) else request.report_data.dict()
+        html = generate_html_report(data, request.branding)
         return {"html": html}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -25,7 +26,8 @@ async def export_html(request: ExportRequest):
 async def export_excel(request: ExportRequest):
     """Export report data as Excel spreadsheet."""
     try:
-        excel_bytes = generate_excel_report(request.report_data.dict())
+        data = request.report_data if isinstance(request.report_data, dict) else request.report_data.dict()
+        excel_bytes = generate_excel_report(data)
         return StreamingResponse(
             io.BytesIO(excel_bytes),
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

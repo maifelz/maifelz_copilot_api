@@ -97,9 +97,9 @@ class AIReportResponse(BaseModel):
 
 
 class ExportRequest(BaseModel):
-    connection_id: str
-    report_data: AIReportResponse
-    format: str = "pdf"  # pdf | excel | csv
+    connection_id: Optional[str] = None
+    report_data: Dict[str, Any]
+    format: str = "excel"  # pdf | excel | csv
     branding: Optional[Dict[str, str]] = None
 
 
