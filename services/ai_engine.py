@@ -84,8 +84,15 @@ CRITICAL SORTING & INTENT RULES:
 
 Translate this query into an Odoo ORM search plan.
 Common Odoo models:
+- stock.warehouse: Warehouses & Storage facilities (name, code, company_id, active) - query this when user asks about warehouses configured, storage facilities, godowns.
+- stock.location: Stock Locations (name, complete_name, usage, location_id, company_id) - query this when user asks about inventory locations, stock shelves, internal locations.
+- res.company: Companies & Multi-company configuration (name, currency_id, email, phone, vat) - query this when user asks about companies, branches, subsidiaries.
+- res.currency: Currencies (name, symbol, rate, active) - query this when user asks about currencies, exchange rates.
+- account.tax: Taxes & GST/VAT rules (name, amount, type_tax_use, amount_type, active) - query this when user asks about taxes, GST, VAT configured.
+- account.journal: Accounting Journals & Payment methods (name, code, type, default_account_id) - query this when user asks about payment methods, journals, bank accounts.
+- mrp.production: Manufacturing Orders / Production (name, product_id, product_qty, state, date_planned_start)
+- hr.employee: HR Employees & Staff (name, work_email, department_id, job_title, work_phone, active)
 - res.users: Odoo System Users & Logins (name, login, active, share, create_date) - query this when user asks about users, logins, system access, how many users configured. Use domain [["share", "=", False]] for internal company users.
-- hr.employee: HR Employees & Staff (name, work_email, department_id, job_title, work_phone)
 - crm.lead: CRM Pipeline & Leads (name, partner_id, partner_name, expected_revenue, stage_id, probability, user_id, create_date, type='opportunity' or 'lead', phone, email_from)
 - purchase.order: Purchase orders & Procurement (name, partner_id, amount_total, date_order, state, user_id)
 - purchase.order.line: Items / products inside a purchase order (order_id, name, product_id, product_qty, price_unit, price_subtotal). Use domain [["order_id.name", "ilike", "P01061"]] when asked about items/products in a specific PO.
@@ -739,7 +746,25 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
         time_title_suffix = "This Month"
 
     # Entities
-    if any(w in p for w in ["user", "users", "login", "logins", "account", "accounts", "staff", "employee", "employees", "configured user", "യൂസർ", "യൂസേഴ്സ്", "ഉപയോക്താക്കൾ", "ജീവനക്കാർ"]) or ("used" in p and any(k in p for k in ["odoo", "how many", "system", "many", "configured"])):
+    if any(w in p for w in ["employee", "employees", "staff", "ജീവനക്കാർ", "സ്റ്റാഫ്"]):
+        return {
+            "entity_type": "employee",
+            "report_title": "Employees & Organizational Staff",
+            "model": "hr.employee",
+            "domain": [["active", "=", True]],
+            "fields": ["name", "job_title", "work_email", "department_id", "work_phone"],
+            "order": "name asc",
+            "limit": 50,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["id"],
+            "date_field": "",
+            "value_field": "id",
+            "is_count": is_count,
+            "is_recognized": True,
+        }
+
+    elif any(w in p for w in ["user", "users", "login", "logins", "account", "accounts", "configured user", "യൂസർ", "യൂസേഴ്സ്", "ഉപയോക്താക്കൾ"]) or ("used" in p and any(k in p for k in ["odoo", "how many", "system", "many", "configured"])):
         domain = [["share", "=", False]]
         return {
             "entity_type": "user",
@@ -757,6 +782,159 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_count": is_count,
             "is_today": is_today,
             "is_recent": is_recent,
+            "is_recognized": True,
+        }
+
+    elif any(w in p for w in ["warehouse", "warehouses", "വേർഹൗസ്", "വേർഹൗസുകൾ", "storage facility"]):
+        return {
+            "entity_type": "warehouse",
+            "report_title": "Configured Warehouses & Storage Facilities",
+            "model": "stock.warehouse",
+            "domain": [["active", "=", True]],
+            "fields": ["name", "code", "company_id", "active"],
+            "order": "name asc",
+            "limit": 50,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["id"],
+            "date_field": "",
+            "value_field": "id",
+            "is_count": is_count,
+            "is_today": False,
+            "is_recent": False,
+            "is_recognized": True,
+        }
+
+    elif any(w in p for w in ["location", "locations", "സ്റ്റോക്ക് ലൊക്കേഷൻ", "ലൊക്കേഷൻ", "ലൊക്കേഷനുകൾ", "internal location", "inventory location"]):
+        domain = [["usage", "=", "internal"]] if "internal" in p else []
+        return {
+            "entity_type": "location",
+            "report_title": "Inventory Stock Locations",
+            "model": "stock.location",
+            "domain": domain,
+            "fields": ["name", "complete_name", "usage", "location_id"],
+            "order": "complete_name asc",
+            "limit": 50,
+            "chart_type": "bar",
+            "x_key": "complete_name",
+            "y_keys": ["id"],
+            "date_field": "",
+            "value_field": "id",
+            "is_count": is_count,
+            "is_recognized": True,
+        }
+
+    elif any(w in p for w in ["company", "companies", "subsidiary", "കമ്പനി", "കമ്പനികൾ", "configured companies"]):
+        return {
+            "entity_type": "company",
+            "report_title": "Configured Companies & Operating Entities",
+            "model": "res.company",
+            "domain": [],
+            "fields": ["name", "currency_id", "phone", "email"],
+            "order": "name asc",
+            "limit": 20,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["id"],
+            "date_field": "",
+            "value_field": "id",
+            "is_count": is_count,
+            "is_recognized": True,
+        }
+
+    elif any(w in p for w in ["currency", "currencies", "കറൻസി", "കറൻസികൾ", "നാണയം"]):
+        domain = [["active", "=", True]] if "active" in p or "all" not in p else []
+        return {
+            "entity_type": "currency",
+            "report_title": "Configured Currencies & Exchange Rates",
+            "model": "res.currency",
+            "domain": domain,
+            "fields": ["name", "symbol", "rate", "active"],
+            "order": "name asc",
+            "limit": 30,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["rate"],
+            "date_field": "",
+            "value_field": "rate",
+            "is_count": is_count,
+            "is_recognized": True,
+        }
+
+    elif any(w in p for w in ["tax", "taxes", "gst", "vat", "നികുതി", "ടാക്സ്", "ടാക്സുകൾ"]):
+        return {
+            "entity_type": "tax",
+            "report_title": "Configured Taxes & Fiscal Rules",
+            "model": "account.tax",
+            "domain": [["active", "=", True]],
+            "fields": ["name", "amount", "type_tax_use", "price_include"],
+            "order": "name asc",
+            "limit": 50,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["amount"],
+            "date_field": "",
+            "value_field": "amount",
+            "is_count": is_count,
+            "is_recognized": True,
+        }
+
+    elif any(w in p for w in ["payment method", "payment methods", "journal", "journals", "bank account", "പേയ്മെന്റ് മെത്തേഡ്"]):
+        return {
+            "entity_type": "journal",
+            "report_title": "Payment Methods & Accounting Journals",
+            "model": "account.journal",
+            "domain": [["active", "=", True]],
+            "fields": ["name", "type", "code"],
+            "order": "type asc, name asc",
+            "limit": 30,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["id"],
+            "date_field": "",
+            "value_field": "id",
+            "is_count": is_count,
+            "is_recognized": True,
+        }
+
+    elif any(w in p for w in ["manufacturing", "manufacturing order", "production order", "mo", "ഉത്പാദനം"]):
+        domain = []
+        if "pending" in p or "open" in p:
+            domain.append(["state", "in", ["confirmed", "progress"]])
+        elif "done" in p or "completed" in p:
+            domain.append(["state", "=", "done"])
+        return {
+            "entity_type": "manufacturing_order",
+            "report_title": "Manufacturing & Production Orders",
+            "model": "mrp.production",
+            "domain": domain,
+            "fields": ["name", "product_id", "product_qty", "state", "date_start"],
+            "order": "date_start desc, id desc",
+            "limit": 30,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["product_qty"],
+            "date_field": "date_start",
+            "value_field": "product_qty",
+            "is_count": is_count,
+            "is_recognized": True,
+        }
+
+    elif any(w in p for w in ["employee", "employees", "staff", "ജീവനക്കാർ", "സ്റ്റാഫ്"]):
+        return {
+            "entity_type": "employee",
+            "report_title": "Employees & Organizational Staff",
+            "model": "hr.employee",
+            "domain": [["active", "=", True]],
+            "fields": ["name", "job_title", "work_email", "department_id", "work_phone"],
+            "order": "name asc",
+            "limit": 50,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["id"],
+            "date_field": "",
+            "value_field": "id",
+            "is_count": is_count,
             "is_recognized": True,
         }
 
@@ -1324,6 +1502,123 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
             "executive_summary": executive_summary,
             "insights": insights,
             "recommendations": recommendations,
+        }
+
+    elif entity == "warehouse":
+        wh_count = len(records)
+        wh_names = [f"{r.get('name')} ({r.get('code')})" for r in records if r.get("name")]
+        names_str = ", ".join(wh_names)
+
+        if is_ml:
+            direct_answer = f"നിങ്ങളുടെ ഒഡൂ ഡാറ്റാബേസിൽ ആകെ **{wh_count} വേർഹൗസുകൾ** കോൺഫിഗർ ചെയ്തിട്ടുണ്ട്: **{names_str}**."
+        else:
+            direct_answer = f"There {'are' if wh_count != 1 else 'is'} **{wh_count} warehouse{'s' if wh_count != 1 else ''}** configured in your Odoo database: **{names_str}**."
+        return {
+            "direct_answer": direct_answer,
+            "executive_summary": "",
+            "insights": [f"Configured warehouses: {names_str}"],
+            "recommendations": [],
+        }
+
+    elif entity == "location":
+        loc_count = len(records)
+        loc_names = [r.get("complete_name") or r.get("name") for r in records[:5]]
+        names_str = ", ".join(filter(None, loc_names))
+        if loc_count > 5:
+            names_str += f" and {loc_count - 5} more"
+
+        if is_ml:
+            direct_answer = f"നിങ്ങളുടെ സിസ്റ്റത്തിൽ ആകെ **{loc_count} സ്റ്റോക്ക് ലൊക്കേഷനുകൾ** കോൺഫിഗർ ചെയ്തിട്ടുണ്ട്: **{names_str}**."
+        else:
+            direct_answer = f"Found **{loc_count} inventory location{'s' if loc_count != 1 else ''}** configured in your system: **{names_str}**."
+        return {
+            "direct_answer": direct_answer,
+            "executive_summary": "",
+            "insights": [f"Total locations: {loc_count}"],
+            "recommendations": [],
+        }
+
+    elif entity == "company":
+        comp_count = len(records)
+        comp_names = [r.get("name") for r in records if r.get("name")]
+        names_str = ", ".join(comp_names)
+
+        if is_ml:
+            direct_answer = f"നിങ്ങളുടെ ഒഡൂ സിസ്റ്റത്തിൽ ആകെ **{comp_count} കമ്പനി{'കൾ' if comp_count > 1 else ''}** കോൺഫിഗർ ചെയ്തിട്ടുണ്ട്: **{names_str}**."
+        else:
+            direct_answer = f"There {'are' if comp_count != 1 else 'is'} **{comp_count} company entity** configured in your Odoo system: **{names_str}**."
+        return {
+            "direct_answer": direct_answer,
+            "executive_summary": "",
+            "insights": [f"Companies: {names_str}"],
+            "recommendations": [],
+        }
+
+    elif entity == "currency":
+        curr_count = len(records)
+        curr_names = [f"{r.get('name')} ({r.get('symbol') or ''})" for r in records[:8]]
+        names_str = ", ".join(curr_names)
+
+        direct_answer = f"There are **{curr_count} active currencies** configured in your Odoo system: **{names_str}**."
+        return {
+            "direct_answer": direct_answer,
+            "executive_summary": "",
+            "insights": [f"Active currencies: {names_str}"],
+            "recommendations": [],
+        }
+
+    elif entity == "tax":
+        tax_count = len(records)
+        tax_names = [f"{r.get('name')} ({r.get('amount')}%)" for r in records[:6]]
+        names_str = ", ".join(tax_names)
+
+        direct_answer = f"Found **{tax_count} active taxes** configured in your database: **{names_str}**."
+        return {
+            "direct_answer": direct_answer,
+            "executive_summary": "",
+            "insights": [f"Taxes: {names_str}"],
+            "recommendations": [],
+        }
+
+    elif entity == "journal":
+        j_count = len(records)
+        j_names = [f"{r.get('name')} ({r.get('type')})" for r in records[:6]]
+        names_str = ", ".join(j_names)
+
+        direct_answer = f"Found **{j_count} payment & accounting journals** configured in your database: **{names_str}**."
+        return {
+            "direct_answer": direct_answer,
+            "executive_summary": "",
+            "insights": [f"Journals: {names_str}"],
+            "recommendations": [],
+        }
+
+    elif entity == "manufacturing_order":
+        mo_count = len(records)
+        direct_answer = f"Found **{mo_count} manufacturing orders** recorded in your system."
+        return {
+            "direct_answer": direct_answer,
+            "executive_summary": "",
+            "insights": [f"Total MOs: {mo_count}"],
+            "recommendations": [],
+        }
+
+    elif entity == "employee":
+        emp_count = len(records)
+        emp_names = [r.get("name") for r in records[:6] if r.get("name")]
+        names_str = ", ".join(emp_names)
+        if emp_count > 6:
+            names_str += f" and {emp_count - 6} more"
+
+        if is_ml:
+            direct_answer = f"നിങ്ങളുടെ സിസ്റ്റത്തിൽ ആകെ **{emp_count} ജീവനക്കാർ (Employees)** കോൺഫിഗർ ചെയ്തിട്ടുണ്ട്: **{names_str}**."
+        else:
+            direct_answer = f"There are **{emp_count} active employees** recorded in your system: **{names_str}**."
+        return {
+            "direct_answer": direct_answer,
+            "executive_summary": "",
+            "insights": [f"Staff: {names_str}"],
+            "recommendations": [],
         }
 
     elif entity == "lead":
@@ -2119,6 +2414,135 @@ def _build_table_data(records: List[Dict], plan: Dict) -> tuple:
                 "origin": str(r.get("origin") or "-"),
                 "date": str(r.get("scheduled_date") or "-")[:10],
                 "state": str(r.get("state") or "draft").replace("_", " ").title(),
+            })
+        return rows, columns
+
+    elif entity == "warehouse":
+        columns = [
+            {"key": "name", "label": "Warehouse Name", "type": "text"},
+            {"key": "code", "label": "Short Code", "type": "badge"},
+            {"key": "company", "label": "Company", "type": "text"},
+            {"key": "active", "label": "Status", "type": "badge"},
+        ]
+        rows = []
+        for r in records:
+            comp = r.get("company_id")
+            comp_name = comp[1] if isinstance(comp, list) and len(comp) == 2 else str(comp or "-")
+            rows.append({
+                "name": r.get("name", "-"),
+                "code": r.get("code", "-"),
+                "company": comp_name,
+                "active": "Active" if r.get("active", True) else "Inactive",
+            })
+        return rows, columns
+
+    elif entity == "location":
+        columns = [
+            {"key": "complete_name", "label": "Location Full Name", "type": "text"},
+            {"key": "usage", "label": "Location Type", "type": "badge"},
+            {"key": "company", "label": "Company", "type": "text"},
+            {"key": "active", "label": "Status", "type": "badge"},
+        ]
+        rows = []
+        for r in records:
+            comp = r.get("company_id")
+            comp_name = comp[1] if isinstance(comp, list) and len(comp) == 2 else str(comp or "-")
+            rows.append({
+                "complete_name": r.get("complete_name") or r.get("name", "-"),
+                "usage": str(r.get("usage") or "internal").capitalize(),
+                "company": comp_name,
+                "active": "Active" if r.get("active", True) else "Inactive",
+            })
+        return rows, columns
+
+    elif entity == "company":
+        columns = [
+            {"key": "name", "label": "Company Name", "type": "text"},
+            {"key": "currency", "label": "Currency", "type": "badge"},
+            {"key": "phone", "label": "Phone", "type": "text"},
+            {"key": "email", "label": "Email", "type": "text"},
+        ]
+        rows = []
+        for r in records:
+            cur = r.get("currency_id")
+            cur_name = cur[1] if isinstance(cur, list) and len(cur) == 2 else str(cur or "-")
+            rows.append({
+                "name": r.get("name", "-"),
+                "currency": cur_name,
+                "phone": r.get("phone") or "-",
+                "email": r.get("email") or "-",
+            })
+        return rows, columns
+
+    elif entity == "currency":
+        columns = [
+            {"key": "name", "label": "Currency Code", "type": "badge"},
+            {"key": "currency_unit_label", "label": "Unit Label", "type": "text"},
+            {"key": "symbol", "label": "Symbol", "type": "text"},
+            {"key": "rate", "label": "Rate", "type": "number"},
+            {"key": "active", "label": "Active", "type": "badge"},
+        ]
+        rows = []
+        for r in records:
+            rows.append({
+                "name": r.get("name", "-"),
+                "currency_unit_label": r.get("currency_unit_label") or r.get("full_name") or "-",
+                "symbol": r.get("symbol", "-"),
+                "rate": float(r.get("rate", 1.0) or 1.0),
+                "active": "Active" if r.get("active", True) else "Inactive",
+            })
+        return rows, columns
+
+    elif entity == "tax":
+        columns = [
+            {"key": "name", "label": "Tax Name", "type": "text"},
+            {"key": "amount", "label": "Tax Rate %", "type": "number"},
+            {"key": "type_tax_use", "label": "Applies To", "type": "badge"},
+            {"key": "active", "label": "Status", "type": "badge"},
+        ]
+        rows = []
+        for r in records:
+            rows.append({
+                "name": r.get("name", "-"),
+                "amount": float(r.get("amount", 0) or 0),
+                "type_tax_use": str(r.get("type_tax_use") or "sale").capitalize(),
+                "active": "Active" if r.get("active", True) else "Inactive",
+            })
+        return rows, columns
+
+    elif entity == "journal":
+        columns = [
+            {"key": "name", "label": "Journal Name", "type": "text"},
+            {"key": "code", "label": "Short Code", "type": "badge"},
+            {"key": "type", "label": "Type", "type": "badge"},
+            {"key": "active", "label": "Status", "type": "badge"},
+        ]
+        rows = []
+        for r in records:
+            rows.append({
+                "name": r.get("name", "-"),
+                "code": r.get("code", "-"),
+                "type": str(r.get("type") or "general").capitalize(),
+                "active": "Active" if r.get("active", True) else "Inactive",
+            })
+        return rows, columns
+
+    elif entity == "employee":
+        columns = [
+            {"key": "name", "label": "Employee Name", "type": "text"},
+            {"key": "job_title", "label": "Job Title", "type": "text"},
+            {"key": "department", "label": "Department", "type": "badge"},
+            {"key": "work_email", "label": "Work Email", "type": "text"},
+        ]
+        rows = []
+        for r in records:
+            dept = r.get("department_id")
+            dept_name = dept[1] if isinstance(dept, list) and len(dept) == 2 else str(dept or "-")
+            rows.append({
+                "name": r.get("name", "-"),
+                "job_title": r.get("job_title") or "-",
+                "department": dept_name,
+                "work_email": r.get("work_email") or "-",
             })
         return rows, columns
 
