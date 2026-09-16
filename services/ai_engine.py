@@ -54,6 +54,8 @@ User Query: "{query}"
 
 Translate this query into an Odoo ORM search plan.
 Common Odoo models:
+- res.users: Odoo System Users & Logins (name, login, active, share, create_date) - query this when user asks about users, logins, system access, how many users configured. Use domain [["share", "=", False]] for internal company users.
+- hr.employee: HR Employees & Staff (name, work_email, department_id, job_title, work_phone)
 - crm.lead: CRM Pipeline & Leads (name, partner_id, partner_name, expected_revenue, stage_id, probability, user_id, create_date, type='opportunity' or 'lead', phone, email_from)
 - account.move: Invoices & bills (move_type='out_invoice' for customer invoices, 'in_invoice' for vendor bills, amount_total, invoice_date, payment_state, partner_id, name, state='posted')
 - sale.order: Sales orders (amount_total, date_order, partner_id, user_id, state='sale' or 'done', name)
@@ -65,15 +67,15 @@ Common Odoo models:
 Respond ONLY with valid JSON (no markdown):
 {{
   "report_title": "Descriptive Title",
-  "model": "crm.lead",
-  "domain": [],
-  "fields": ["name", "partner_id", "expected_revenue", "stage_id", "create_date"],
+  "model": "res.users",
+  "domain": [["share", "=", false]],
+  "fields": ["name", "login", "active", "create_date"],
   "order": "create_date desc",
   "limit": 25,
   "chart_type": "bar",
   "x_key": "name",
-  "y_keys": ["expected_revenue"],
-  "entity_type": "lead"
+  "y_keys": ["id"],
+  "entity_type": "user"
 }}
 """
 
@@ -184,12 +186,19 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
 
 async def _llm_classify(c_type: str, client: Any, prompt: str, today_str: str) -> Dict:
     full_prompt = PROMPT_TO_QUERY_PROMPT.format(today=today_str, query=prompt)
+    text = ""
     if c_type == "gemini":
-        resp = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
-            contents=full_prompt,
-        )
-        text = resp.text.strip()
+        for m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+            try:
+                resp = client.models.generate_content(
+                    model=m,
+                    contents=full_prompt,
+                )
+                text = resp.text.strip()
+                if text:
+                    break
+            except Exception:
+                continue
     else:
         # OpenAI or Groq
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -203,7 +212,11 @@ async def _llm_classify(c_type: str, client: Any, prompt: str, today_str: str) -
         )
         text = resp.choices[0].message.content.strip()
 
-    text = re.sub(r"```json\s*|\s*```", "", text).strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        text = match.group(0)
+    else:
+        text = re.sub(r"```json\s*|\s*```", "", text).strip()
     return json.loads(text)
 
 
@@ -214,12 +227,19 @@ async def _llm_synthesize(c_type: str, client: Any, prompt: str, sample_records:
         records=json.dumps(sample_records, default=str)[:3500],
         total_count=len(sample_records),
     )
+    text = ""
     if c_type == "gemini":
-        resp = client.models.generate_content(
-            model="gemini-2.0-flash-exp",
-            contents=prompt_synth,
-        )
-        text = resp.text.strip()
+        for m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+            try:
+                resp = client.models.generate_content(
+                    model=m,
+                    contents=prompt_synth,
+                )
+                text = resp.text.strip()
+                if text:
+                    break
+            except Exception:
+                continue
     else:
         model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         if "groq" in str(getattr(client, "base_url", "")):
@@ -232,7 +252,11 @@ async def _llm_synthesize(c_type: str, client: Any, prompt: str, sample_records:
         )
         text = resp.choices[0].message.content.strip()
 
-    text = re.sub(r"```json\s*|\s*```", "", text).strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    if match:
+        text = match.group(0)
+    else:
+        text = re.sub(r"```json\s*|\s*```", "", text).strip()
     return json.loads(text)
 
 
@@ -255,7 +279,27 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
     order_dir = "asc" if is_lowest else "desc"
 
     # Entities
-    if any(w in p for w in ["lead", "pipeline", "crm", "opportunity", "deal"]):
+    if any(w in p for w in ["user", "users", "login", "logins", "account", "accounts", "staff", "employee", "employees", "configured user"]) or ("used" in p and any(k in p for k in ["odoo", "how many", "system", "many", "configured"])):
+        domain = [["share", "=", False]]
+        return {
+            "entity_type": "user",
+            "report_title": "Configured Odoo Users & System Access",
+            "model": "res.users",
+            "domain": domain,
+            "fields": ["name", "login", "active", "create_date", "share"],
+            "order": "name asc",
+            "limit": 50,
+            "chart_type": "bar",
+            "x_key": "name",
+            "y_keys": ["id"],
+            "date_field": "create_date",
+            "value_field": "id",
+            "is_count": is_count,
+            "is_today": is_today,
+            "is_recent": is_recent,
+        }
+
+    elif any(w in p for w in ["lead", "pipeline", "crm", "opportunity", "deal"]):
         domain = [["type", "=", "opportunity"]]
         if is_today:
             domain.append(["create_date", ">=", today.strftime("%Y-%m-%d 00:00:00")])
@@ -461,7 +505,37 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
     partner_1 = _partner_str(top_record)
     total_val = sum(float(r.get(plan.get("value_field", "amount_total"), 0) or 0) for r in records)
 
-    if entity == "lead":
+    if entity == "user":
+        user_count = len(records)
+        user_names = [r.get("name") for r in records if r.get("name")]
+        names_str = ", ".join(user_names[:6])
+        if len(user_names) > 6:
+            names_str += f" and {len(user_names) - 6} more"
+
+        direct_answer = (
+            f"There are **{user_count} active internal users** configured in your Odoo system: **{names_str}**."
+        )
+        executive_summary = (
+            f"Retrieved {user_count} internal user accounts configured in Odoo. "
+            f"All accounts have active ERP credentials and role assignments."
+        )
+        insights = [
+            f"Total configured internal seats: {user_count} users",
+            f"Active logins: {names_str}",
+            f"Primary system administrator / key account: {records[0].get('name', 'Admin')} ({records[0].get('login', '-')})",
+        ]
+        recommendations = [
+            "Periodically audit user access groups and revoke inactive seat credentials to optimize Odoo license costs.",
+            "Enforce two-factor authentication (2FA) for all administrative logins.",
+        ]
+        return {
+            "direct_answer": direct_answer,
+            "executive_summary": executive_summary,
+            "insights": insights,
+            "recommendations": recommendations,
+        }
+
+    elif entity == "lead":
         rev_1 = _cur(top_record.get("expected_revenue", 0))
         c_date_1 = str(top_record.get("create_date") or "")[:10]
         today_date_str = today.strftime("%B %d, %Y")
@@ -585,6 +659,16 @@ def _build_chart_data(records: List[Dict], plan: Dict) -> List[Dict]:
     if not records:
         return []
 
+    if plan.get("entity_type") == "user":
+        return [
+            {
+                "label": r.get("name", "User")[:20],
+                "value": 1,
+                "name": r.get("name", "User")[:20],
+            }
+            for r in records[:15]
+        ]
+
     chart_points = []
     value_field = plan.get("value_field", "amount_total")
 
@@ -618,7 +702,24 @@ def _build_table_data(records: List[Dict], plan: Dict) -> tuple:
 
     entity = plan.get("entity_type", "invoice")
 
-    if entity == "lead":
+    if entity == "user":
+        columns = [
+            {"key": "name", "label": "User Name", "type": "text"},
+            {"key": "login", "label": "Login / Email", "type": "text"},
+            {"key": "active", "label": "Account Status", "type": "badge"},
+            {"key": "date", "label": "Created Date", "type": "date"},
+        ]
+        rows = []
+        for r in records:
+            rows.append({
+                "name": r.get("name", "-"),
+                "login": r.get("login", "-"),
+                "active": "Active" if r.get("active", True) else "Inactive",
+                "date": str(r.get("create_date") or "-")[:10],
+            })
+        return rows, columns
+
+    elif entity == "lead":
         columns = [
             {"key": "name", "label": "Lead / Opportunity", "type": "text"},
             {"key": "partner", "label": "Contact / Customer", "type": "text"},
@@ -706,6 +807,45 @@ def _build_kpi_cards(records: List[Dict], plan: Dict) -> List[Dict]:
     """Generates informative KPI metric cards."""
     if not records:
         return []
+
+    if plan.get("entity_type") == "user":
+        active_count = sum(1 for r in records if r.get("active", True))
+        first_admin = records[0].get("name", "Administrator") if records else "Admin"
+        first_email = records[0].get("login", "") if records else ""
+        return [
+            {
+                "title": "Total Users",
+                "value": str(len(records)),
+                "change": "Configured",
+                "change_type": "up",
+                "icon": "users",
+                "description": "Configured internal users",
+            },
+            {
+                "title": "Active Seats",
+                "value": str(active_count),
+                "change": "100%",
+                "change_type": "up",
+                "icon": "user-check",
+                "description": "Active system logins",
+            },
+            {
+                "title": "Internal Licenses",
+                "value": str(len(records)),
+                "change": None,
+                "change_type": "neutral",
+                "icon": "shield",
+                "description": "Internal employee seats",
+            },
+            {
+                "title": "System Lead",
+                "value": first_admin[:18],
+                "change": None,
+                "change_type": "neutral",
+                "icon": "award",
+                "description": first_email[:25],
+            },
+        ]
 
     val_field = plan.get("value_field", "amount_total")
     values = [float(r.get(val_field, 0) or 0) for r in records]
