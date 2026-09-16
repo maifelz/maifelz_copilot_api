@@ -325,20 +325,21 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
     """Accurately decomposes user intent, entity, timeframe, and sorting."""
     p = prompt.lower()
 
-    # Timeframe detection
-    is_today = any(w in p for w in ["today", "to day", "current day"])
-    is_this_month = ("this month" in p or "current month" in p) and not is_today
-    is_last_month = "last month" in p
-    is_this_year = "this year" in p
+    # Timeframe detection (English + Malayalam + Transliterated)
+    is_today = any(w in p for w in ["today", "to day", "current day", "ഇന്ന്", "ഇന്നത്തെ", "innu", "innathe"])
+    is_this_month = (any(w in p for w in ["this month", "current month", "ഈ മാസം", "ഈ മാസത്തെ", "ee masam"]) and not is_today)
+    is_last_month = any(w in p for w in ["last month", "കഴിഞ്ഞ മാസം", "കഴിഞ്ഞ മാസത്തെ", "kazhinja masam"])
+    is_this_year = any(w in p for w in ["this year", "ഈ വർഷം", "ഈ വർഷത്തെ"])
 
-    # Sort order & intent
-    is_lowest = any(w in p for w in ["lowest", "smallest", "least", "cheapest", "minimum", "worst"])
-    is_recent = any(w in p for w in ["last", "latest", "recent", "newest", "number"])
-    is_count = any(w in p for w in ["how many", "count", "number of", "total"])
+    # Sort order & intent (English + Malayalam)
+    is_lowest = any(w in p for w in ["lowest", "smallest", "least", "cheapest", "minimum", "worst", "കുറഞ്ഞ", "ഏറ്റവും കുറഞ്ഞ", "ചെറിയ", "കുറവ്"])
+    is_recent = any(w in p for w in ["last", "latest", "recent", "newest", "number", "അവസാന", "ഏറ്റവും പുതിയ", "അവസാനത്തെ", "പുതിയ"])
+    is_count = any(w in p for w in ["how many", "count", "number of", "total", "എത്ര", "എണ്ണം", "ആകെ", "എത്രയുണ്ട്", "എത്ര ഉണ്ട്", "ethra"])
+    is_highest = any(w in p for w in ["highest", "biggest", "top", "largest", "maximum", "best", "most", "കൂടിയ", "കൂടുതൽ", "വലിയ", "ഏറ്റവും കൂടുതൽ", "ഉയർന്ന", "ഏറ്റവും ഉയർന്ന", "kooduthal", "valiya"])
     order_dir = "asc" if is_lowest else "desc"
 
     # Entities
-    if any(w in p for w in ["user", "users", "login", "logins", "account", "accounts", "staff", "employee", "employees", "configured user"]) or ("used" in p and any(k in p for k in ["odoo", "how many", "system", "many", "configured"])):
+    if any(w in p for w in ["user", "users", "login", "logins", "account", "accounts", "staff", "employee", "employees", "configured user", "യൂസർ", "യൂസേഴ്സ്", "ഉപയോക്താക്കൾ", "ജീവനക്കാർ"]) or ("used" in p and any(k in p for k in ["odoo", "how many", "system", "many", "configured"])):
         domain = [["share", "=", False]]
         return {
             "entity_type": "user",
@@ -358,7 +359,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_recent": is_recent,
         }
 
-    elif any(w in p for w in ["lead", "pipeline", "crm", "opportunity", "deal"]):
+    elif any(w in p for w in ["lead", "pipeline", "crm", "opportunity", "deal", "ലീഡ്", "ലീഡുകൾ"]):
         domain = [["type", "=", "opportunity"]]
         if is_today:
             domain.append(["create_date", ">=", today.strftime("%Y-%m-%d 00:00:00")])
@@ -386,16 +387,16 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_recent": is_recent,
         }
 
-    elif any(w in p for w in ["invoice", "bill", "payment", "overdue", "outstanding", "receivable"]):
+    elif any(w in p for w in ["invoice", "bill", "payment", "overdue", "outstanding", "receivable", "ഇൻവോയ്സ്", "ബിൽ", "പണം", "കുടിശ്ശിക"]):
         domain = [["move_type", "=", "out_invoice"]]
-        if "overdue" in p:
+        if "overdue" in p or "കുടിശ്ശിക" in p:
             domain.append(["payment_state", "!=", "paid"])
             domain.append(["invoice_date_due", "<", today.strftime("%Y-%m-%d")])
         elif "paid" in p and "unpaid" not in p:
             domain.append(["payment_state", "=", "paid"])
 
         # Filter for posted / numbered invoices when asking for invoice number or recent
-        if is_recent or "number" in p:
+        if is_recent or "number" in p or "നമ്പർ" in p:
             domain.append(["state", "=", "posted"])
             domain.append(["name", "!=", "/"])
 
@@ -429,9 +430,9 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
 
     # Check for specific purchase order line items e.g. "what is the items in purchase order P01061"
     po_ref_match = re.search(r"\b(p0\d+|p\d{3,})\b", p)
-    is_asking_lines = any(w in p for w in ["item", "items", "product", "products", "line", "lines", "part", "parts", "component", "components", "what is in", "what are in", "contain", "contains"])
+    is_asking_lines = any(w in p for w in ["item", "items", "product", "products", "line", "lines", "part", "parts", "component", "components", "what is in", "what are in", "contain", "contains", "ഉള്ള സാധനങ്ങൾ", "സാധനങ്ങൾ", "ഉൽപ്പന്നങ്ങൾ", "ഐറ്റംസ്"])
 
-    if po_ref_match or (is_asking_lines and any(w in p for w in ["purchase", "po", "procurement", "vendor order", "supplier order"])):
+    if po_ref_match or (is_asking_lines and any(w in p for w in ["purchase", "po", "procurement", "vendor order", "supplier order", "പർച്ചേസ്", "വാങ്ങൽ", "സപ്ലയർ"])):
         po_ref = po_ref_match.group(1).upper() if po_ref_match else None
         domain = [["order_id.name", "ilike", po_ref]] if po_ref else []
         title = f"Items in Purchase Order {po_ref}" if po_ref else "Purchase Order Line Items"
@@ -456,7 +457,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
 
     # Check for specific sales order line items e.g. "what is the items in sales order S00049"
     so_ref_match = re.search(r"\b(s0\d+|so\d+|s\d{4,})\b", p)
-    if so_ref_match or (is_asking_lines and any(w in p for w in ["sale", "so", "quote", "quotation", "sales order"])):
+    if so_ref_match or (is_asking_lines and any(w in p for w in ["sale", "so", "quote", "quotation", "sales order", "സെയിൽസ്", "വിൽപന"])):
         so_ref = so_ref_match.group(1).upper() if so_ref_match else None
         domain = [["order_id.name", "ilike", so_ref]] if so_ref else []
         title = f"Items in Sales Order {so_ref}" if so_ref else "Sales Order Line Items"
@@ -479,7 +480,7 @@ def _smart_nlp_classify(prompt: str, today: datetime) -> Dict:
             "is_count": is_count,
         }
 
-    elif any(w in p for w in ["purchase", "po", "procurement", "vendor order", "supplier order", "buying"]):
+    elif any(w in p for w in ["purchase", "po", "procurement", "vendor order", "supplier order", "buying", "പർച്ചേസ്", "വാങ്ങൽ", "സപ്ലയർ", "purchase order", "പർച്ചേസുകൾ"]):
         domain = []
         if "draft" in p:
             domain.append(["state", "=", "draft"])
@@ -895,22 +896,41 @@ def _smart_nlp_synthesize(prompt: str, records: List[Dict], plan: Dict, today: d
         amount_1 = _cur(top_record.get("amount_total", 0))
         date_1 = str(top_record.get("date_order", "N/A"))[:10]
         status_1 = str(top_record.get("state") or "draft").replace("_", " ").title()
-        direct_answer = (
-            f"You have **{len(records)} purchase order{'s' if len(records) != 1 else ''}** recorded totaling **{_cur(total_val)}**. "
-            f"The primary purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Status: {status_1})."
-        )
-        executive_summary = (
-            f"Analyzed {len(records)} procurement records representing {_cur(total_val)} in total vendor commitments."
-        )
-        insights = [
-            f"Top purchase order: {name_1} ({partner_1}) at {amount_1}",
-            f"Total procurement volume in this group: {_cur(total_val)}",
-            f"Average PO commitment: {_cur(total_val / len(records))}",
-        ]
-        recommendations = [
-            "Review unconfirmed draft purchase orders with suppliers to ensure on-time delivery schedules.",
-            "Consolidate volume orders with preferred vendors to capture tiered pricing discounts.",
-        ]
+        is_ml = any('\u0D00' <= c <= '\u0D7F' for c in prompt)
+
+        if is_ml:
+            direct_answer = (
+                f"ഏറ്റവും ഉയർന്ന തുകയുള്ള പർച്ചേസ് ഓർഡർ **{name_1}** ആണ് ({partner_1}). ആകെ തുക: **{amount_1}** (ഓർഡർ തീയതി: {date_1}, സ്റ്റാറ്റസ്: {status_1})."
+            )
+            executive_summary = (
+                f"നിങ്ങളുടെ ഒഡൂ സിസ്റ്റത്തിലെ {len(records)} പർച്ചേസ് ഓർഡറുകൾ വിശകലനം ചെയ്തു. ആകെ വാങ്ങൽ മൂല്യം {_cur(total_val)} ആണ്."
+            )
+            insights = [
+                f"പ്രധാന പർച്ചേസ് ഓർഡർ: {name_1} ({partner_1}) - {amount_1}",
+                f"ആകെ പർച്ചേസ് ബാധ്യത: {_cur(total_val)}",
+                f"ശരാശരി ഓർഡർ തുക: {_cur(total_val / len(records))}",
+            ]
+            recommendations = [
+                "മെറ്റീരിയൽ കൃത്യസമയത്ത് ലഭിക്കാൻ സപ്ലയർ ഡെലിവറി തീയതി ഉറപ്പാക്കുക.",
+                "കൂടുതൽ വിലക്കിഴിവ് ലഭിക്കാൻ പ്രധാന സപ്ലയർമാരുമായുള്ള ഓർഡറുകൾ ഏകീകരിക്കുക.",
+            ]
+        else:
+            direct_answer = (
+                f"You have **{len(records)} purchase order{'s' if len(records) != 1 else ''}** recorded totaling **{_cur(total_val)}**. "
+                f"The primary purchase order is **{name_1}** with **{partner_1}** for **{amount_1}** (Status: {status_1})."
+            )
+            executive_summary = (
+                f"Analyzed {len(records)} procurement records representing {_cur(total_val)} in total vendor commitments."
+            )
+            insights = [
+                f"Top purchase order: {name_1} ({partner_1}) at {amount_1}",
+                f"Total procurement volume in this group: {_cur(total_val)}",
+                f"Average PO commitment: {_cur(total_val / len(records))}",
+            ]
+            recommendations = [
+                "Review unconfirmed draft purchase orders with suppliers to ensure on-time delivery schedules.",
+                "Consolidate volume orders with preferred vendors to capture tiered pricing discounts.",
+            ]
 
     elif entity == "project":
         lead_user = top_record.get("user_id")
@@ -1025,17 +1045,27 @@ def _build_chatter_clarifications(prompt: str, raw_data: List[Dict], plan: Dict)
     # Helper for partner name
     partner = top.get("partner_id") or top.get("partner_name")
     p_name = partner[1] if isinstance(partner, list) and len(partner) == 2 else str(partner or "")
+    is_ml = any('\u0D00' <= c <= '\u0D7F' for c in prompt)
 
     # 1. Purchase Orders
     if entity == "purchase_order":
         po_name = top.get("name", "PO")
-        clarification = f"Would you like to drill down into the line items for purchase order **{po_name}**, or filter by supplier?"
-        suggestions = [
-            f"What are the items in purchase order {po_name}?",
-            f"Show purchase orders from {p_name}" if p_name else "Show purchase orders this month",
-            "Show only draft purchase orders",
-            "What is our largest purchase order?",
-        ]
+        if is_ml:
+            clarification = f"പർച്ചേസ് ഓർഡർ **{po_name}**-ലെ സാധനങ്ങളുടെ വിവരങ്ങൾ (Items) പരിശോധിക്കണോ, അതോ സപ്ലയർ ഓർഡറുകൾ കാണണോ?"
+            suggestions = [
+                f"പർച്ചേസ് ഓർഡർ {po_name} ലെ സാധനങ്ങൾ ഏതൊക്കെ?",
+                f"{p_name}-ൽ നിന്നുള്ള പർച്ചേസുകൾ കാണിക്കുക" if p_name else "ഈ മാസത്തെ എല്ലാ പർച്ചേസ് ഓർഡറുകളും",
+                "ഡ്രാഫ്റ്റ് പർച്ചേസ് ഓർഡറുകൾ മാത്രം കാണിക്കുക",
+                "ഏറ്റവും ഉയർന്ന തുകയുള്ള പർച്ചേസ് ഓർഡർ ഏതാണ്?",
+            ]
+        else:
+            clarification = f"Would you like to drill down into the line items for purchase order **{po_name}**, or filter by supplier?"
+            suggestions = [
+                f"What are the items in purchase order {po_name}?",
+                f"Show purchase orders from {p_name}" if p_name else "Show purchase orders this month",
+                "Show only draft purchase orders",
+                "What is our largest purchase order?",
+            ]
         return clarification, [s for s in suggestions if s]
 
     # 2. Purchase Order Line Items
