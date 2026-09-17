@@ -217,14 +217,13 @@ def authenticate_user(email: str, password: str) -> Tuple[bool, str, Optional[Di
                 "role": "master_admin",
                 "status": "active",
             }
-            first_conn = list(_tenants.values())[0].get("connection_id", "") if _tenants else ""
             master_tenant = {
                 "id": "tenant-maifelz-hq",
                 "company_name": "mAifelZ Technologies HQ",
                 "license_key": "MFZ-MASTER-ROOT-ADMIN",
                 "plan": "enterprise",
                 "status": "active",
-                "connection_id": first_conn,
+                "connection_id": "",
                 "monthly_limit": 999999,
                 "queries_used": 0,
             }
@@ -312,6 +311,19 @@ def link_connection_to_tenant(connection_id: str, license_key: str) -> Tuple[boo
     _tenants[tenant["id"]] = tenant
     _save_tenants()
     return True, f"Successfully linked to {tenant['company_name']} ({tenant['plan'].title()} Plan)"
+
+
+def assign_tenant_connection(tenant_id: str, connection_id: str) -> Tuple[bool, str]:
+    """Assign or switch the linked Odoo database connection for a tenant."""
+    _load_tenants()
+    tenant = _tenants.get(tenant_id)
+    if not tenant:
+        return False, "Tenant not found"
+
+    tenant["connection_id"] = (connection_id or "").strip()
+    _tenants[tenant_id] = tenant
+    _save_tenants()
+    return True, f"Assigned database to {tenant['company_name']}"
 
 
 # ── Limit Enforcement & Metering ──────────────────────────────────────────────

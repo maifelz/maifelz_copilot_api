@@ -15,6 +15,7 @@ class CreateTenantRequest(BaseModel):
     company_name: str
     contact_email: str
     plan: str = "professional"  # starter | professional | enterprise
+    connection_id: Optional[str] = None
     custom_limit: Optional[int] = None
     notes: Optional[str] = ""
 
@@ -51,6 +52,7 @@ async def provision_new_tenant(req: CreateTenantRequest):
         company_name=req.company_name,
         contact_email=req.contact_email,
         plan=req.plan,
+        connection_id=req.connection_id,
         custom_limit=req.custom_limit,
         notes=req.notes or "",
     )
@@ -197,6 +199,69 @@ async def link_license_to_connection(req: LinkLicenseRequest):
         raise HTTPException(status_code=400, detail=msg)
 
     return {"success": True, "message": msg}
+
+
+class AssignConnectionRequest(BaseModel):
+    connection_id: str
+
+
+@router.post("/tenants/{tenant_id}/connection")
+async def assign_tenant_connection_endpoint(tenant_id: str, req: AssignConnectionRequest):
+    """Assign or switch the Odoo database connection for this client tenant."""
+    ok, msg = tm.assign_tenant_connection(tenant_id, req.connection_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail=msg)
+    return {"success": True, "message": msg, "tenant": tm.get_tenant_by_id(tenant_id)}
+
+
+class ConnectAndAssignRequest(BaseModel):
+    url: str
+    database: str
+    username: str
+    password: str
+    label: Optional[str] = None
+
+
+@router.post("/tenants/{tenant_id}/connect-odoo")
+async def connect_and_assign_odoo(tenant_id: str, req: ConnectAndAssignRequest):
+    """Connect a client's Odoo instance directly from Admin and bind to the tenant."""
+    tenant = tm.get_tenant_by_id(tenant_id)
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    from services.odoo_connector import OdooConnector, save_connection
+    connector = OdooConnector(
+        url=req.url.strip(),
+        database=req.database.strip(),
+        username=req.username.strip(),
+        password=req.password.strip(),
+    )
+    success, message = connector.authenticate()
+    if not success:
+        raise HTTPException(status_code=400, detail=f"Odoo Connection Failed: {message}")
+
+    company = connector.get_company_info()
+    company_name = company.get("name", req.label or tenant["company_name"]) if company else (req.label or tenant["company_name"])
+
+    conn_id = save_connection(
+        url=connector.url,
+        database=req.database.strip(),
+        username=req.username.strip(),
+        password=req.password.strip(),
+        label=req.label or company_name,
+        uid=connector.uid,
+        odoo_version=connector.odoo_version,
+        company_name=company_name,
+    )
+
+    tm.assign_tenant_connection(tenant_id, conn_id)
+    return {
+        "success": True,
+        "message": f"Successfully connected to Odoo ({company_name}) and assigned to {tenant['company_name']}",
+        "connection_id": conn_id,
+        "tenant": tm.get_tenant_by_id(tenant_id),
+    }
+
 
 
 
