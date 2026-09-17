@@ -28,6 +28,7 @@ class PromptRequest(BaseModel):
     connection_id: str
     prompt: str
     context: Optional[str] = None
+    history: Optional[List[Dict[str, Any]]] = None
 
 
 class ChartType(str, Enum):

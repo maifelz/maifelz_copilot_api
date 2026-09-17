@@ -111,7 +111,7 @@ async def generate_ai_report(request: PromptRequest):
         raise HTTPException(status_code=403, detail=error_msg)
 
     try:
-        result = await process_prompt(connector, request.prompt)
+        result = await process_prompt(connector, request.prompt, history=request.history)
         if tenant:
             result["queries_used"] = tenant.get("queries_used", 0)
             result["monthly_limit"] = tenant.get("monthly_limit", 2500)

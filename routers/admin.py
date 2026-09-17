@@ -263,6 +263,21 @@ async def connect_and_assign_odoo(tenant_id: str, req: ConnectAndAssignRequest):
     }
 
 
+@router.get("/download-odoo-module")
+async def download_odoo_module():
+    """Download the official mAifelZ AI Odoo 19 Addon (.zip)."""
+    import os
+    from fastapi.responses import FileResponse
+    zip_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "maifelz_odoo_ai_module.zip")
+    if not os.path.exists(zip_path):
+        raise HTTPException(status_code=404, detail="Module package not found on server.")
+    return FileResponse(
+        zip_path,
+        filename="maifelz_ai_copilot_v19.zip",
+        media_type="application/zip"
+    )
+
+
 
 
 

@@ -136,6 +136,18 @@ class OdooConnector:
             kwargs["limit"] = limit
         return self.execute(model, "read_group", domain, fields, groupby, **kwargs)
 
+    def create_record(self, model: str, values: Dict[str, Any]) -> int:
+        """Create a new record in Odoo and return its new integer ID."""
+        return self.execute(model, "create", values)
+
+    def write_record(self, model: str, record_id: int, values: Dict[str, Any]) -> bool:
+        """Update an existing record in Odoo."""
+        return self.execute(model, "write", [record_id], values)
+
+    def call_action(self, model: str, method: str, record_ids: List[int], *args, **kwargs) -> Any:
+        """Call a business method on one or more records (e.g. action_confirm)."""
+        return self.execute(model, method, record_ids, *args, **kwargs)
+
     def get_model_fields(self, model: str) -> Dict[str, Dict]:
         """Get field definitions for a model (introspection)."""
         return self.execute(model, "fields_get", [], attributes=["string", "type", "relation", "required"])

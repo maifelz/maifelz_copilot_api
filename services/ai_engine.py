@@ -443,19 +443,297 @@ async def _execute_multi_topic_report(
     }
 
 
-async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any]:
+WRITE_ACTION_TRIGGERS = [
+    "create sale order", "create sales order", "create quotation", "create a quotation",
+    "create quote", "new quotation", "new sale order", "new sales order",
+    "create order for", "place order for", "create lead", "new lead", "add lead",
+    "add customer", "create customer", "സെയിൽസ് ഓർഡർ ക്രിയേറ്റ്", "പുതിയ കൊട്ടേഷൻ",
+    "ഓർഡർ ക്രിയേറ്റ്", "ലീഡ് ഉണ്ടാക്കുക"
+]
+
+ACTION_PARSE_PROMPT = """You are an intelligent ERP action executor.
+Today's date: {today}
+User prompt: "{prompt}"
+
+Determine if the user explicitly wants to CREATE / ADD a new record in Odoo:
+- "create_sale_order": Create a sales order or quotation
+- "create_lead": Create a CRM lead / opportunity
+- "none": The user is merely asking a question or requesting a report
+
+If action is "create_sale_order", extract:
+{{
+  "is_action": true,
+  "action": "create_sale_order",
+  "partner_name": "Customer Name or Company",
+  "product_name": "Product or Service Name",
+  "qty": 1.0,
+  "price_unit": 0.0,
+  "note": "Optional note"
+}}
+
+If action is "create_lead", extract:
+{{
+  "is_action": true,
+  "action": "create_lead",
+  "name": "Opportunity Name or Subject",
+  "partner_name": "Contact or Company Name",
+  "expected_revenue": 0.0,
+  "phone": "",
+  "email": ""
+}}
+
+If user is just asking for data/reports, respond:
+{{
+  "is_action": false
+}}
+
+Respond ONLY with valid JSON (no markdown):
+"""
+
+
+async def _handle_write_action(
+    connector: OdooConnector,
+    prompt: str,
+    client_type: str,
+    client: Any,
+    today_str: str
+) -> Optional[Dict[str, Any]]:
+    p_lower = prompt.lower()
+    is_write_intent = any(t in p_lower for t in WRITE_ACTION_TRIGGERS) or (
+        "create" in p_lower and any(w in p_lower for w in ["order", "quotation", "quote", "lead"])
+    )
+    if not is_write_intent:
+        return None
+
+    action_data = None
+    if client:
+        try:
+            full_prompt = ACTION_PARSE_PROMPT.format(today=today_str, prompt=prompt)
+            text = ""
+            if client_type == "gemini":
+                for m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
+                    try:
+                        resp = client.models.generate_content(model=m, contents=full_prompt)
+                        text = resp.text.strip()
+                        if text:
+                            break
+                    except Exception:
+                        continue
+            else:
+                resp = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": full_prompt}],
+                    temperature=0.1,
+                    response_format={"type": "json_object"}
+                )
+                text = resp.choices[0].message.content.strip()
+
+            match = re.search(r"\{.*\}", text, re.DOTALL)
+            if match:
+                action_data = json.loads(match.group(0))
+        except Exception:
+            pass
+
+    if not action_data or not action_data.get("is_action"):
+        return None
+
+    action_type = action_data.get("action")
+
+    # 1. CREATE SALES ORDER / QUOTATION
+    if action_type == "create_sale_order":
+        try:
+            partner_name = action_data.get("partner_name", "").strip() or "Standard Customer"
+            partners = connector.search_read("res.partner", [["name", "ilike", partner_name]], ["id", "name"], limit=1)
+            if partners:
+                partner_id = partners[0]["id"]
+                partner_display = partners[0]["name"]
+            else:
+                partner_id = connector.create_record("res.partner", {"name": partner_name, "customer_rank": 1})
+                partner_display = partner_name
+
+            prod_name = action_data.get("product_name", "").strip() or "Standard Product"
+            prods = connector.search_read("product.product", [["name", "ilike", prod_name]], ["id", "name", "list_price"], limit=1)
+            if not prods:
+                prods = connector.search_read("product.product", [["sale_ok", "=", True]], ["id", "name", "list_price"], limit=1)
+
+            if prods:
+                prod_id = prods[0]["id"]
+                prod_display = prods[0]["name"]
+                price = float(action_data.get("price_unit") or prods[0].get("list_price") or 100.0)
+            else:
+                prod_id = connector.create_record("product.product", {
+                    "name": prod_name,
+                    "type": "service",
+                    "list_price": float(action_data.get("price_unit") or 100.0)
+                })
+                prod_display = prod_name
+                price = float(action_data.get("price_unit") or 100.0)
+
+            qty = float(action_data.get("qty") or 1.0)
+            order_lines = [
+                (0, 0, {
+                    "product_id": prod_id,
+                    "product_uom_qty": qty,
+                    "price_unit": price,
+                })
+            ]
+
+            order_vals = {
+                "partner_id": partner_id,
+                "order_line": order_lines,
+                "note": action_data.get("note", "Created automatically via mAifelZ AI Copilot"),
+            }
+            so_id = connector.create_record("sale.order", order_vals)
+            so_rec = connector.search_read("sale.order", [["id", "=", so_id]], ["name", "amount_total", "date_order"], limit=1)
+            so_ref = so_rec[0]["name"] if so_rec else f"SO-{so_id}"
+            amount_total = so_rec[0].get("amount_total", qty * price) if so_rec else (qty * price)
+
+            return {
+                "success": True,
+                "prompt": prompt,
+                "report_title": f"Created Quotation {so_ref}",
+                "direct_answer": f"Successfully created Quotation **{so_ref}** for customer **{partner_display}** in Odoo! Total amount: **${amount_total:,.2f}** ({int(qty) if qty.is_integer() else qty}x {prod_display} @ ${price:,.2f}).",
+                "executive_summary": f"Quotation {so_ref} has been created as a Draft order in Odoo and is ready for review or confirmation.",
+                "kpi_cards": [
+                    {"title": "Quotation Ref", "value": so_ref, "icon": "check-circle", "change_type": "up", "description": "Draft State"},
+                    {"title": "Customer", "value": partner_display, "icon": "users", "description": f"ID #{partner_id}"},
+                    {"title": "Order Total", "value": f"${amount_total:,.2f}", "icon": "dollar-sign", "change_type": "up"},
+                    {"title": "Quantity", "value": f"{int(qty) if qty.is_integer() else qty} units", "icon": "package", "description": prod_display[:20]},
+                ],
+                "table_columns": [
+                    {"key": "product", "label": "Product / Service", "type": "text"},
+                    {"key": "qty", "label": "Quantity", "type": "number"},
+                    {"key": "price_unit", "label": "Unit Price", "type": "currency"},
+                    {"key": "subtotal", "label": "Subtotal", "type": "currency"},
+                ],
+                "table_records": [
+                    {
+                        "product": prod_display,
+                        "qty": qty,
+                        "price_unit": price,
+                        "subtotal": qty * price,
+                    }
+                ],
+                "sections": [
+                    {
+                        "id": "confirmation",
+                        "title": "Order Created Successfully",
+                        "content": f"New Sales Quotation `{so_ref}` created in Odoo on {today_str}. The quotation is in Draft state.",
+                        "chart_type": "kpi"
+                    }
+                ],
+                "insights": [
+                    f"Quotation #{so_ref} is created in 'draft' status so you can review before confirming.",
+                    f"Linked to customer {partner_display} (ID: {partner_id})."
+                ],
+                "recommendations": [
+                    "Open Odoo Sales -> Quotations to review, send by email, or confirm into a confirmed Sales Order."
+                ],
+                "follow_up_suggestions": [
+                    f"Show details of quotation {so_ref}",
+                    f"What are pending quotations for {partner_display}?",
+                    "Show all quotations created this week"
+                ],
+                "raw_data_available": True,
+                "engine": "mAifelZ Action Engine",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "prompt": prompt,
+                "report_title": "Failed to create Quotation",
+                "direct_answer": f"Could not create quotation in Odoo: {str(e)}",
+                "executive_summary": "An error occurred while communicating with Odoo ORM to create the sales order.",
+                "kpi_cards": [],
+                "table_columns": [],
+                "table_records": [],
+                "sections": [],
+                "insights": [str(e)],
+                "recommendations": ["Check if user credentials have write access to Sales Orders in Odoo."],
+                "raw_data_available": False,
+                "engine": "mAifelZ Action Engine",
+                "error": str(e),
+            }
+
+    # 2. CREATE CRM LEAD
+    if action_type == "create_lead":
+        try:
+            lead_name = action_data.get("name") or f"Opportunity for {action_data.get('partner_name', 'Lead')}"
+            vals = {
+                "name": lead_name,
+                "partner_name": action_data.get("partner_name", ""),
+                "expected_revenue": float(action_data.get("expected_revenue", 0.0)),
+                "phone": action_data.get("phone", ""),
+                "email_from": action_data.get("email", ""),
+            }
+            lead_id = connector.create_record("crm.lead", vals)
+            return {
+                "success": True,
+                "prompt": prompt,
+                "report_title": f"Created Lead #{lead_id}",
+                "direct_answer": f"Successfully created CRM Lead **'{lead_name}'** (ID: #{lead_id}) in Odoo with expected revenue **${float(action_data.get('expected_revenue', 0)):,.2f}**.",
+                "executive_summary": "Lead has been registered in the CRM pipeline.",
+                "kpi_cards": [
+                    {"title": "Lead ID", "value": f"#{lead_id}", "icon": "check-circle", "change_type": "up"},
+                    {"title": "Contact", "value": action_data.get("partner_name") or "New Lead", "icon": "users"},
+                    {"title": "Expected Revenue", "value": f"${float(action_data.get('expected_revenue', 0)):,.2f}", "icon": "dollar-sign"},
+                ],
+                "table_columns": [],
+                "table_records": [],
+                "sections": [],
+                "insights": ["Lead created in CRM stage 'New'."],
+                "recommendations": ["Assign a salesperson or schedule an activity for follow-up."],
+                "follow_up_suggestions": [
+                    "Show all new leads this week",
+                    "What is our total expected revenue in CRM?"
+                ],
+                "raw_data_available": True,
+                "engine": "mAifelZ Action Engine",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "prompt": prompt,
+                "report_title": "Failed to create Lead",
+                "direct_answer": f"Could not create lead in Odoo: {str(e)}",
+                "executive_summary": "An error occurred while creating CRM lead.",
+                "kpi_cards": [],
+                "table_columns": [],
+                "table_records": [],
+                "sections": [],
+                "insights": [str(e)],
+                "recommendations": [],
+                "raw_data_available": False,
+                "engine": "mAifelZ Action Engine",
+                "error": str(e),
+            }
+
+    return None
+
+
+async def process_prompt(
+    connector: OdooConnector,
+    prompt: str,
+    history: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
     """
     Main AI pipeline:
-    1. Parse user intent (via LLM or Smart BI NLP).
-    2. Check for multi-topic requests (e.g. Purchase Orders + CRM + Projects).
-    3. Execute exact Odoo search_read & read_group queries with MCP schema validation.
-    4. Synthesize a Direct Conversational Answer + KPIs + Chart + Table.
+    1. Check for Action intents (e.g. create sales order, lead).
+    2. Parse user query intent (via LLM with conversational history, or Smart BI NLP).
+    3. Check for multi-topic requests (e.g. Purchase Orders + CRM + Projects).
+    4. Execute exact Odoo search_read & read_group queries with MCP schema validation.
+    5. Synthesize a Direct Conversational Answer + KPIs + Chart + Table.
     """
     today = datetime.now()
     today_str = today.strftime("%Y-%m-%d")
     client_type, client = get_llm_client()
 
     engine_name = "Google Gemini 2.0 Flash" if client_type == "gemini" else ("OpenAI GPT-4o" if client_type == "openai" else "Smart ERP Intelligence")
+
+    # 0. Check for Transactional Actions (e.g. Create Sales Order / Quotation)
+    action_result = await _handle_write_action(connector, prompt, client_type, client, today_str)
+    if action_result:
+        return action_result
 
     # 1. Check for Multi-Topic / Multi-Department requests (e.g. Purchase Orders + CRM + Projects)
     multi_topics = _detect_multi_topics(prompt)
@@ -467,12 +745,10 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
     query_plan = None
     engine_name = "Google Gemini 2.0 Flash" if client_type == "gemini" else ("OpenAI GPT-4o" if client_type == "openai" else "Smart ERP Intelligence")
 
-    # The user explicitly requested:
-    # "can you try only with gemini to get detsails , for the timebeing jut stop if any other method is trying to answer"
-    # When Gemini/LLM client is available, run ONLY via Gemini:
+    # When Gemini/LLM client is available, run ONLY via Gemini with history:
     if client:
         try:
-            query_plan = await _llm_classify(client_type, client, prompt, today_str)
+            query_plan = await _llm_classify(client_type, client, prompt, today_str, history=history)
         except Exception:
             pass
 
@@ -501,7 +777,8 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
                 raw_data[:25],
                 today_str,
                 model_name=query_plan.get("model", "record"),
-                model_fields=query_plan.get("_fields_meta")
+                model_fields=query_plan.get("_fields_meta"),
+                history=history
             )
         except Exception:
             pass
@@ -575,8 +852,26 @@ async def process_prompt(connector: OdooConnector, prompt: str) -> Dict[str, Any
 
 # ── LLM Execution ─────────────────────────────────────────────────────────────
 
-async def _llm_classify(c_type: str, client: Any, prompt: str, today_str: str) -> Dict:
-    full_prompt = PROMPT_TO_QUERY_PROMPT.format(today=today_str, query=prompt)
+async def _llm_classify(
+    c_type: str,
+    client: Any,
+    prompt: str,
+    today_str: str,
+    history: Optional[List[Dict[str, Any]]] = None
+) -> Dict:
+    history_ctx = ""
+    if history and isinstance(history, list):
+        turns = []
+        for h in history[-4:]:
+            role = str(h.get("role", "user")).capitalize()
+            c = str(h.get("content", ""))[:250].replace("\n", " ")
+            if c:
+                turns.append(f"{role}: {c}")
+        if turns:
+            history_ctx = "\n=== RECENT CONVERSATION CONTEXT (Resolve follow-up questions & pronouns) ===\n" + "\n".join(turns) + "\n========================================================================\n"
+
+    effective_query = f"{history_ctx}Current User Query: \"{prompt}\"" if history_ctx else prompt
+    full_prompt = PROMPT_TO_QUERY_PROMPT.format(today=today_str, query=effective_query)
     text = ""
     if c_type == "gemini":
         for m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]:
@@ -619,7 +914,8 @@ async def _llm_synthesize(
     today_str: str,
     model_name: str = "record",
     model_fields: Optional[Dict] = None,
-    aggregations_summary: str = ""
+    aggregations_summary: str = "",
+    history: Optional[List[Dict[str, Any]]] = None
 ) -> Dict:
     # Use MCP RecordFormatter to turn raw records into clean, unambiguous representation
     formatted_recs = ""
@@ -639,9 +935,20 @@ async def _llm_synthesize(
         combined_data_text += f"=== SERVER-CALCULATED AGGREGATES & STATUS BREAKDOWN ===\n{aggregations_summary}\n\n"
     combined_data_text += f"=== DETAILED RECORDS ({model_name}) ===\n{formatted_recs}"
 
+    history_ctx = ""
+    if history and isinstance(history, list):
+        turns = []
+        for h in history[-3:]:
+            role = str(h.get("role", "user")).capitalize()
+            c = str(h.get("content", ""))[:200].replace("\n", " ")
+            if c:
+                turns.append(f"{role}: {c}")
+        if turns:
+            history_ctx = f" (Follow-up context: {' | '.join(turns)})"
+
     prompt_synth = GEMINI_SYNTHESIS_PROMPT.format(
         today=today_str,
-        query=prompt,
+        query=f"{prompt}{history_ctx}",
         records=combined_data_text[:5000],
         total_count=len(sample_records),
     )
